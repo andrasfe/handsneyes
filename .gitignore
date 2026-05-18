@@ -47,6 +47,11 @@ captured_frames/
 .claude/
 .mcp.json
 
+# Polecat worktree infrastructure (per-session, not source)
+.runtime/
+.beads/redirect
+/CLAUDE.md
+
 # Run-time artefacts (homing logs, oracle dumps — may include screenshots)
 *.log
 
