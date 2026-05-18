@@ -1,0 +1,63 @@
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific
+config/handsneyes.yaml
+config/targets.toml
+captured_frames/
+*.png
+*.jpg
+
+# Per-machine / user-local files
+.claude/
+.mcp.json
+
+# Run-time artefacts (homing logs, oracle dumps — may include screenshots)
+*.log
+
+# Password files — never commit
+*.pass
+*.password
+
+# ML artefacts. Per-platform model checkpoints under
+# src/handsneyes/platforms/*/models/ ARE checked in. Everything else
+# under data/ml/ stays local (per-user retrained variants, raw datasets,
+# canary eval sets).
+data/ml/
+!src/handsneyes/platforms/*/models/
+*.safetensors
