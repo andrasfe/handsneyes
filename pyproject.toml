@@ -26,6 +26,8 @@ dependencies = [
     # extra closing brace, trailing comma, single quotes). json-repair
     # recovers those without us having to special-case each pattern.
     "json-repair>=0.50",
+    # AES-256-GCM + scrypt KDF for handsneyes.core.vault.
+    "cryptography>=42.0.0",
 ]
 
 [project.optional-dependencies]
