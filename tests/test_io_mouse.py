@@ -19,7 +19,7 @@ def test_base_is_abstract() -> None:
 
 
 @pytest.fixture
-def mock_client():
+def mock_client() -> AsyncMock:
     return AsyncMock(spec=httpx.AsyncClient)
 
 
@@ -69,7 +69,7 @@ class TestConnect:
 
 class TestMove:
     @pytest.mark.asyncio
-    async def test_http_backend_move_via_post(self, mock_client) -> None:
+    async def test_http_backend_move_via_post(self, mock_client: AsyncMock) -> None:
         mouse = HttpMouseOutput()
         mouse._client = mock_client
         mock_response = MagicMock()
@@ -82,7 +82,7 @@ class TestMove:
         )
 
     @pytest.mark.asyncio
-    async def test_move_usb_transport(self, mock_client) -> None:
+    async def test_move_usb_transport(self, mock_client: AsyncMock) -> None:
         mouse = HttpMouseOutput(transport="usb")
         mouse._client = mock_client
         mock_response = MagicMock()
@@ -97,7 +97,7 @@ class TestMove:
 
 class TestClick:
     @pytest.mark.asyncio
-    async def test_http_backend_click_left_button(self, mock_client) -> None:
+    async def test_http_backend_click_left_button(self, mock_client: AsyncMock) -> None:
         mouse = HttpMouseOutput()
         mouse._client = mock_client
         mock_response = MagicMock()
@@ -110,7 +110,7 @@ class TestClick:
         )
 
     @pytest.mark.asyncio
-    async def test_click_right(self, mock_client) -> None:
+    async def test_click_right(self, mock_client: AsyncMock) -> None:
         mouse = HttpMouseOutput()
         mouse._client = mock_client
         mock_response = MagicMock()
@@ -125,7 +125,7 @@ class TestClick:
 
 class TestScroll:
     @pytest.mark.asyncio
-    async def test_scroll(self, mock_client) -> None:
+    async def test_scroll(self, mock_client: AsyncMock) -> None:
         mouse = HttpMouseOutput()
         mouse._client = mock_client
         mock_response = MagicMock()
@@ -154,7 +154,7 @@ class TestNotConnected:
 
 class TestDisconnect:
     @pytest.mark.asyncio
-    async def test_disconnect(self, mock_client) -> None:
+    async def test_disconnect(self, mock_client: AsyncMock) -> None:
         mouse = HttpMouseOutput()
         mouse._client = mock_client
 
