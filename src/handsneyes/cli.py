@@ -18,20 +18,21 @@ testing happens via the library tests in ``tests/``.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 from typing import TYPE_CHECKING
 
 import handsneyes
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
 from handsneyes.core.agents.controller import plan_intent
 from handsneyes.platforms import (
     UnknownPlatformError,
     available_platforms,
     load_adapter,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -149,18 +150,74 @@ def _cmd_do(args: argparse.Namespace) -> int:
             "fallback. For now, try: 'scroll down 6', 'type hello', "
             "'login', or 'lock'."
         )
-    if args.dry_run:
+    if args.dry_run or not plan:
         print(json.dumps(payload, indent=2))
         return 0 if plan else 1
-    # Phase A: even non-dry-run is just a plan dump with a note.
-    # Phase B wires in executors.
-    payload["note"] = (
-        "non-dry-run execution lands in Phase B alongside the click "
-        "engine and OS-specific adapters. For now the planner output "
-        "is what you get."
+
+    # ── Non-dry-run execution ──────────────────────────────────────
+    # Build an AgentContext from the resolved target + adapter, then
+    # hand the plan to PlanExecutor. Headless targets have no HID /
+    # capture / vision client, so the executor will report graceful
+    # per-step "no X in context" outcomes — the path runs without
+    # raising.
+    import asyncio
+
+    from handsneyes.core.agents.context import AgentContext
+    from handsneyes.core.agents.executor import PlanExecutor
+    from handsneyes.io.keyboard import HttpKeyboardOutput, PlatformKeyboard
+    from handsneyes.io.mouse import HttpMouseOutput
+
+    keyboard: object | None = None
+    mouse: object | None = None
+    if target is not None and target.platform != "headless":
+        raw_kb = HttpKeyboardOutput(
+            base_url=target.pi_url,
+            transport=target.transport,
+        )
+        keyboard = PlatformKeyboard(raw_kb, adapter)
+        mouse = HttpMouseOutput(
+            base_url=target.pi_url,
+            transport=target.transport,
+        )
+    ctx = AgentContext(
+        keyboard=keyboard,  # type: ignore[arg-type]
+        mouse=mouse,  # type: ignore[arg-type]
+        platform=adapter,
     )
-    print(json.dumps(payload, indent=2))
-    return 0 if plan else 1
+
+    async def _go() -> int:
+        if keyboard is not None and hasattr(keyboard, "connect"):
+            try:
+                await keyboard.connect()
+            except Exception as e:  # noqa: BLE001
+                print(
+                    f"warning: keyboard connect failed: {e}",
+                    file=sys.stderr,
+                )
+        if mouse is not None and hasattr(mouse, "connect"):
+            try:
+                await mouse.connect()
+            except Exception as e:  # noqa: BLE001
+                print(
+                    f"warning: mouse connect failed: {e}",
+                    file=sys.stderr,
+                )
+        executor = PlanExecutor(ctx)
+        results = await executor.run(plan)
+        if keyboard is not None and hasattr(keyboard, "disconnect"):
+            with contextlib.suppress(Exception):
+                await keyboard.disconnect()
+        if mouse is not None and hasattr(mouse, "disconnect"):
+            with contextlib.suppress(Exception):
+                await mouse.disconnect()
+        payload["results"] = [r.as_dict() for r in results]
+        payload["executable"] = True
+        all_ok = all(r.outcome.success for r in results)
+        payload["success"] = all_ok
+        print(json.dumps(payload, indent=2))
+        return 0 if all_ok else 1
+
+    return asyncio.run(_go())
 
 
 def _cmd_platforms(_: argparse.Namespace) -> int:

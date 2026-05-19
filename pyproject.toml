@@ -46,7 +46,7 @@ rpi = [
 ]
 
 [project.scripts]
-handsneyes = "handsneyes.cli:main"
+handsneyes    = "handsneyes.cli:main"
 handsneyes-pi = "handsneyes.pi.server:main"
 
 [project.entry-points."handsneyes.platforms"]
