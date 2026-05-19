@@ -50,7 +50,7 @@ class CursorAgent(Agent):
 
     name = "cursor"
 
-    async def run(
+    async def run(  # type: ignore[override]
         self,
         *,
         mode: str = "auto",

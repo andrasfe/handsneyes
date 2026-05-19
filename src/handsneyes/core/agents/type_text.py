@@ -25,7 +25,7 @@ class TypeAgent(Agent):
 
     name = "type"
 
-    async def run(
+    async def run(  # type: ignore[override]
         self,
         *,
         text: str,

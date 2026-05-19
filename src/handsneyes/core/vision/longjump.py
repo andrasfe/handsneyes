@@ -1,3 +1,4 @@
+# mypy: disable-error-code = "no-any-return"
 """Long-jump HID predictor for the visual servo homer.
 
 Companion to :class:`PointerAccelModel`. Where the per-step pointer-

@@ -34,7 +34,7 @@ class ScrollAgent(Agent):
 
     name = "scroll"
 
-    async def run(
+    async def run(  # type: ignore[override]
         self,
         *,
         direction: str = "down",

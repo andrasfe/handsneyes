@@ -1,3 +1,4 @@
+# mypy: disable-error-code = "no-any-return"
 # ruff: noqa: N806
 #   J = Jacobian, conventional uppercase in Newton-iteration / linalg code.
 """Open-loop pointer-acceleration model.

@@ -73,12 +73,16 @@ class KeyboardOutput(ABC):
         ...
 
     @abstractmethod
-    async def send_text(self, text: str) -> None:
+    async def send_text(self, text: str, **kwargs: object) -> None:
         """Type a string of text character by character.
 
         Args:
             text: The text string to type. Does NOT automatically press
                   Enter at the end.
+            **kwargs: Backend-specific options. Standard names that
+                concrete backends should accept:
+                ``secret=True`` to redact the text from local logs,
+                ``warmup=False`` to skip the per-character HID warmup.
 
         Raises:
             KeyboardOutputError: If text input fails.

@@ -47,7 +47,7 @@ class WakeAgent(Agent):
 
     name = "wake"
 
-    async def run(
+    async def run(  # type: ignore[override]
         self,
         *,
         jiggle_count: int = 4,

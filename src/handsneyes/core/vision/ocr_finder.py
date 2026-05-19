@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import cv2
 
@@ -65,7 +65,7 @@ def _preprocess_for_ocr(
 
 def _ocr_words(
     image_bgr: np.ndarray, scale: int, psm: int, invert: bool = False,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Run tesseract once at given preprocessing and return word records."""
     pre = _preprocess_for_ocr(image_bgr, scale=scale, invert=invert)
     h_pre, w_pre = pre.shape[:2]
@@ -78,7 +78,7 @@ def _ocr_words(
         logger.warning("Tesseract failed (psm=%d): %s", psm, e)
         return []
     n = len(data.get("text", []))
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
     for i in range(n):
         word = (data["text"][i] or "").strip()
         if not word:

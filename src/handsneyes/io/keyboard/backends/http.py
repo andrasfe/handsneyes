@@ -65,7 +65,7 @@ class HttpKeyboardOutput(KeyboardOutput):
         )
         logger.debug("Sent key combo: %s+%s", "+".join(modifiers), key)
 
-    async def send_text(
+    async def send_text(  # type: ignore[override]
         self,
         text: str,
         *,
@@ -93,7 +93,7 @@ class HttpKeyboardOutput(KeyboardOutput):
         else:
             logger.debug("Sent text: %s", text[:50])
 
-    async def _post(self, path: str, payload: dict) -> httpx.Response:
+    async def _post(self, path: str, payload: dict[str, object]) -> httpx.Response:
         """Send a POST request to the endpoint."""
         if self._client is None:
             raise KeyboardOutputError(

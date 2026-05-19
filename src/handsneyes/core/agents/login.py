@@ -80,7 +80,7 @@ def resolve_password(
             passphrase = get_passphrase(prompt="Vault passphrase: ")
             vault = Vault(passphrase)
         try:
-            return vault.get(vault_name)  # type: ignore[attr-defined]
+            return str(vault.get(vault_name))  # type: ignore[attr-defined]
         except KeyError as e:
             raise ValueError(
                 f"Vault has no entry named {vault_name!r}. "
@@ -111,7 +111,7 @@ class LoginAgent(Agent):
 
     name = "login"
 
-    async def run(
+    async def run(  # type: ignore[override]
         self,
         *,
         password: str | None = None,
@@ -180,7 +180,7 @@ class LoginAgent(Agent):
             text=pw, secret=True, submit=submit,
         )
         # Drop the password reference promptly.
-        pw = None  # noqa: F841 — intentional reassignment to drop reference
+        del pw
         if not type_outcome:
             return LoginOutcome(
                 success=False,

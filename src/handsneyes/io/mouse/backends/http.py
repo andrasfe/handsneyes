@@ -82,7 +82,7 @@ class HttpMouseOutput(MouseOutput):
         await self._post(f"{self._prefix}/scroll", {"amount": amount})
         logger.debug("Mouse scroll: %d", amount)
 
-    async def _post(self, path: str, payload: dict) -> httpx.Response:
+    async def _post(self, path: str, payload: dict[str, object]) -> httpx.Response:
         """Send a POST request to the Pi."""
         if self._client is None:
             raise MouseOutputError("Not connected to Pi", backend="http")

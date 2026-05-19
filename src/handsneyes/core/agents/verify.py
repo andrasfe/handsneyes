@@ -49,7 +49,7 @@ class VerifyAgent(Agent):
 
     name = "verify"
 
-    async def run(
+    async def run(  # type: ignore[override]
         self,
         *,
         question: str,
@@ -178,7 +178,7 @@ class VerifyAgent(Agent):
             return ""
 
     @staticmethod
-    def _extract_json(raw: str) -> dict | None:
+    def _extract_json(raw: str) -> dict[str, Any] | None:
         """Best-effort JSON extraction from a free-form model response.
 
         Looks for the first ``{...}`` substring and json.loads it. Returns
@@ -190,6 +190,9 @@ class VerifyAgent(Agent):
         if not m:
             return None
         try:
-            return json.loads(m.group(0))
+            parsed = json.loads(m.group(0))
         except json.JSONDecodeError:
             return None
+        if not isinstance(parsed, dict):
+            return None
+        return parsed

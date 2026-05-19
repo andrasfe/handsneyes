@@ -65,7 +65,7 @@ class TargetAgent(Agent):
 
     name = "target"
 
-    async def run(
+    async def run(  # type: ignore[override]
         self,
         *,
         description: str,

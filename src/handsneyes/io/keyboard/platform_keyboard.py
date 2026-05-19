@@ -55,4 +55,4 @@ class PlatformKeyboard(KeyboardOutput):
     async def send_text(self, text: str, **kwargs: object) -> None:
         # Forward arbitrary keyword args (secret=, warmup=) — backends
         # accept different sets and we don't want to second-guess them.
-        await self._inner.send_text(text, **kwargs)  # type: ignore[arg-type]
+        await self._inner.send_text(text, **kwargs)

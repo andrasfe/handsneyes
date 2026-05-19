@@ -25,10 +25,8 @@ from __future__ import annotations
 import logging
 import os
 from importlib.metadata import entry_points
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from handsneyes.platforms.base import PlatformAdapter
+from handsneyes.platforms.base import PlatformAdapter  # noqa: TC001 — used as concrete return type
 
 _GROUP = "handsneyes.platforms"
 _ENV_OVERRIDE = "HANDSNEYES_PLATFORM"
@@ -71,7 +69,8 @@ def load_adapter(name: str) -> PlatformAdapter:
             f"See docs/porting-to-new-os.md to add one."
         )
     cls = eps[0].load()
-    return cls()
+    instance: PlatformAdapter = cls()
+    return instance
 
 
 __all__ = [

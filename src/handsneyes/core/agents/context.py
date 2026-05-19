@@ -158,13 +158,13 @@ class AgentContext:
         *,
         intent: str,
         agent_name: str,
-        kwargs: dict | None,
+        kwargs: dict[str, Any] | None,
         outcome_success: bool,
         outcome_reason: str,
-        history: list[dict] | None = None,
+        history: list[dict[str, Any]] | None = None,
         frame_before_seq: int | None = None,
         frame_after_seq: int | None = None,
-        extra: dict | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> Path | None:
         """Append one row to ``<output_dir>/steps.jsonl``.
 
