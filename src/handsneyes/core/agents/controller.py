@@ -103,6 +103,57 @@ def plan_intent(intent: str) -> list[PlanStep]:
             ),
         ]
 
+    # ── navigate (URL-like) ────────────────────────────────────────
+    # "go to <url>" / "open <url>" / "navigate to <url>" / "browse to <url>"
+    # / a bare URL like "https://reddit.com/r/LocalLLaMA". The host part
+    # is what disambiguates this from a generic "open the calculator" —
+    # require a dotted domain or an explicit scheme.
+    nav_m = re.match(
+        r"^\s*(?:go\s+to|open|navigate\s+to|browse\s+to|visit)\s+(.+)$",
+        intent,
+        re.IGNORECASE,
+    )
+    url_candidate: str | None = None
+    if nav_m:
+        candidate = nav_m.group(1).strip().rstrip(".,;:")
+        if "." in candidate or "://" in candidate:
+            url_candidate = candidate
+    elif re.match(r"^\s*https?://\S+\s*$", intent, re.IGNORECASE):
+        url_candidate = intent.strip()
+    if url_candidate:
+        if not re.match(r"^https?://", url_candidate, re.IGNORECASE):
+            url_candidate = "https://" + url_candidate
+        return [
+            PlanStep(
+                agent="navigate",
+                kwargs={"url": url_candidate},
+                rationale=f"navigate-keyword match → {url_candidate}",
+            ),
+        ]
+
+    # ── click (find-target-and-click) ─────────────────────────────
+    # "click <target>" → ClickAgent target= remainder.
+    click_m = re.match(r"^\s*click\s+(?:on\s+)?(.+)$", intent, re.IGNORECASE)
+    if click_m:
+        target = click_m.group(1).strip()
+        return [
+            PlanStep(
+                agent="click",
+                kwargs={"target": target},
+                rationale=f"click-keyword match → {target!r}",
+            ),
+        ]
+
+    # ── focus ──────────────────────────────────────────────────────
+    if re.match(r"^\s*(focus|maximi[sz]e)\b", text):
+        return [
+            PlanStep(
+                agent="focus",
+                kwargs={},
+                rationale="focus-keyword match",
+            ),
+        ]
+
     # ── type ────────────────────────────────────────────────────────
     # Crude: "type X" → send X. Anything richer (URL, keystrokes,
     # multi-line) is Phase B controller's job.

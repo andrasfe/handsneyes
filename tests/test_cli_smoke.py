@@ -105,6 +105,36 @@ def test_dry_run_type_strips_quotes() -> None:
     assert step["kwargs"]["submit"] is False
 
 
+def test_dry_run_navigate_url() -> None:
+    p = _plan_for("go to reddit.com/r/LocalLLaMA")
+    assert p["__rc__"] == 0
+    step = p["plan"][0]
+    assert step["agent"] == "navigate"
+    assert step["kwargs"]["url"] == "https://reddit.com/r/LocalLLaMA"
+
+
+def test_dry_run_navigate_https_already_present() -> None:
+    p = _plan_for("open https://example.com/path")
+    assert p["plan"][0]["kwargs"]["url"] == "https://example.com/path"
+
+
+def test_dry_run_bare_url() -> None:
+    p = _plan_for("https://example.com")
+    assert p["plan"][0]["agent"] == "navigate"
+
+
+def test_dry_run_click_target() -> None:
+    p = _plan_for("click the Run button")
+    step = p["plan"][0]
+    assert step["agent"] == "click"
+    assert step["kwargs"]["target"] == "the Run button"
+
+
+def test_dry_run_focus() -> None:
+    p = _plan_for("focus")
+    assert p["plan"][0]["agent"] == "focus"
+
+
 def test_dry_run_unmatched_intent_returns_exit_1() -> None:
     p = _plan_for("eat a sandwich")
     assert p["__rc__"] == 1
