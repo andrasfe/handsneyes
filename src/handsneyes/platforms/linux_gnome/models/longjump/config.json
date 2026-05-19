@@ -1,0 +1,19 @@
+{
+  "hidden": 48,
+  "direction": "longjump",
+  "hid_scale": 500.0,
+  "input_features": [
+    "target_dx_pct",
+    "target_dy_pct",
+    "initial_cursor_x_centred",
+    "initial_cursor_y_centred"
+  ],
+  "output_features": [
+    "total_hid_dx_norm",
+    "total_hid_dy_norm"
+  ],
+  "augmented": true,
+  "train_rows": 148,
+  "val_rows": 4,
+  "platform": "ubuntu-libinput-adaptive"
+}

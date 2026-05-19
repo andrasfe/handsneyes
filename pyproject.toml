@@ -50,7 +50,9 @@ handsneyes = "handsneyes.cli:main"
 handsneyes-pi = "handsneyes.pi.server:main"
 
 [project.entry-points."handsneyes.platforms"]
-headless = "handsneyes.platforms.headless:HeadlessAdapter"
+headless    = "handsneyes.platforms.headless:HeadlessAdapter"
+linux_gnome = "handsneyes.platforms.linux_gnome:LinuxGnomeAdapter"
+macos       = "handsneyes.platforms.macos:MacOSAdapter"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/handsneyes"]

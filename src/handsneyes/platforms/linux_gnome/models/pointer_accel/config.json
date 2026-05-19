@@ -1,0 +1,18 @@
+{
+  "hidden": 48,
+  "direction": "inverse",
+  "input_features": [
+    "measured_dx_pct",
+    "measured_dy_pct",
+    "cursor_x_centred",
+    "cursor_y_centred"
+  ],
+  "output_features": [
+    "hid_dx_norm",
+    "hid_dy_norm"
+  ],
+  "augmented": true,
+  "train_rows": 1048,
+  "val_rows": 18,
+  "platform": "ubuntu-libinput-adaptive"
+}

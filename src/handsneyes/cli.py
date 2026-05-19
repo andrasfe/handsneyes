@@ -80,6 +80,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="List registered platform adapters.",
     )
 
+    # ── targets ────────────────────────────────────────────────────
+    sub.add_parser(
+        "targets",
+        help="List configured targets (from targets.toml).",
+    )
+
     # ── vault ──────────────────────────────────────────────────────
     v = sub.add_parser("vault", help="Credential vault operations.")
     vsub = v.add_subparsers(dest="vault_command", required=True)
@@ -101,20 +107,42 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_do(args: argparse.Namespace) -> int:
+    # Resolve --target through the targets registry first. The argument
+    # may name either a configured target (in which case we use its
+    # platform) or a bare platform adapter name (back-compat with
+    # Phase A — "headless" is both a default target and a platform).
+    from handsneyes.targets import TargetRegistry
+
+    registry = TargetRegistry.load_default()
+    target_name = args.target
+    if target_name in registry.targets:
+        target = registry.get(target_name)
+        platform_name = target.platform
+    else:
+        target = None
+        platform_name = target_name
+
     try:
-        adapter = load_adapter(args.target)
+        adapter = load_adapter(platform_name)
     except UnknownPlatformError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     plan = plan_intent(args.intent)
-    payload = {
+    payload: dict[str, object] = {
         "intent": args.intent,
-        "target": args.target,
+        "target": target_name,
         "platform": adapter.name,
         "platform_display": adapter.display_name,
         "plan": [step.as_dict() for step in plan],
-        "executable": False,  # Phase A: planner-only
+        "executable": False,
     }
+    if target is not None:
+        payload["target_config"] = {
+            "pi_url": target.pi_url,
+            "transport": target.transport,
+            "camera_index": target.camera_index,
+            "screen_size": list(target.screen_size),
+        }
     if not plan:
         payload["error"] = (
             "no rule matched this intent — Phase B will add LLM "
@@ -207,9 +235,29 @@ def _cmd_version(_: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_targets(_: argparse.Namespace) -> int:
+    from handsneyes.targets import TargetRegistry
+
+    reg = TargetRegistry.load_default()
+    if not reg.targets:
+        print("(no targets configured)")
+        return 0
+    source = str(reg.source) if reg.source else "(built-in default)"
+    print(f"# source: {source}")
+    for name in reg.names():
+        t = reg.get(name)
+        suffix = f"  ({t.description})" if t.description else ""
+        print(
+            f"{name}\tplatform={t.platform}\tpi={t.pi_url}\t"
+            f"transport={t.transport}\tcam={t.camera_index}{suffix}"
+        )
+    return 0
+
+
 _HANDLERS = {
     "do": _cmd_do,
     "platforms": _cmd_platforms,
+    "targets": _cmd_targets,
     "vault": _cmd_vault,
     "version": _cmd_version,
 }
