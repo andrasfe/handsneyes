@@ -25,8 +25,26 @@ if TYPE_CHECKING:
     from handsneyes.core.agents.context import AgentContext
 
 
-class _EvaluatorShim:
-    """Minimal stand-in for the legacy commander.evaluator helpers."""
+class ConditionEvaluator:
+    """Minimal stand-in for the legacy commander.evaluator helpers.
+
+    Exposes the two methods the homer + ported cc/factory call:
+    ``_best_text_from_response`` and ``_extract_json``. Constructor
+    accepts the kwargs the cc factory passes (model, base_url,
+    max_tokens) and ignores them — the shim has no actual LLM client
+    of its own; agents that need one carry it via AgentContext.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str = "",
+        base_url: str = "",
+        max_tokens: int = 800,
+    ) -> None:
+        self.model = model
+        self.base_url = base_url
+        self.max_tokens = max_tokens
 
     @staticmethod
     def _best_text_from_response(resp: Any) -> str:  # noqa: ANN401
@@ -71,7 +89,7 @@ class SessionAdapter:
         self._capture = ctx.capture
         self._client = ctx.vision_client
         self._model = ctx.vision_model
-        self._evaluator = _EvaluatorShim()
+        self._evaluator = ConditionEvaluator()
         # The homer drops per-step images alongside the rest of the
         # session artefacts.
         self.output_dir = ctx.output_dir

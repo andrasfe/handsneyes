@@ -99,6 +99,25 @@ def _build_parser() -> argparse.ArgumentParser:
     vrm.add_argument("name")
     vsub.add_parser("status", help="Show vault path + entry count.")
 
+    # ── commandcenter / cc ────────────────────────────────────────
+    cc = sub.add_parser(
+        "commandcenter",
+        aliases=["cc"],
+        help="Start the Command Center web UI (FastAPI on LAN).",
+    )
+    cc.add_argument("--host", default="0.0.0.0")
+    cc.add_argument("--port", type=int, default=8765)
+    cc.add_argument(
+        "--frames-dir",
+        default=None,
+        help=(
+            "Watch directory for captured frames. Default: "
+            "$HANDSNEYES_OUTPUT_DIR or "
+            "~/.local/share/handsneyes/runs/"
+        ),
+    )
+    cc.add_argument("--max-frames", type=int, default=500)
+
     # ── version (also via --version) ──────────────────────────────
     sub.add_parser("version", help="Print handsneyes version.")
     return p
@@ -311,12 +330,75 @@ def _cmd_targets(_: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_commandcenter(args: argparse.Namespace) -> int:
+    """Start the Command Center FastAPI server.
+
+    Resolves the active target from the registry (first configured
+    target, or the headless default) and builds a per-run factory
+    that constructs an AgentContext with that target's HID + camera.
+    """
+    from pathlib import Path
+
+    import uvicorn
+
+    from handsneyes.targets import TargetRegistry
+    from handsneyes.ui.factory import make_target_context_factory
+    from handsneyes.ui.frame_store import DEFAULT_WATCH_DIR, FrameStore
+    from handsneyes.ui.log_bus import LogBus
+    from handsneyes.ui.server import create_app
+
+    registry = TargetRegistry.load_default()
+    # Pick the first non-headless target if one exists; otherwise
+    # headless. For multi-target switching we'll need a UI control;
+    # Phase C ships single-target.
+    names = registry.names()
+    chosen = next(
+        (n for n in names if registry.get(n).platform != "headless"),
+        names[0] if names else "headless",
+    )
+    target = registry.get(chosen)
+    try:
+        adapter = load_adapter(target.platform)
+    except UnknownPlatformError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    print(
+        f"handsneyes cc: target={chosen!r}, platform={target.platform}, "
+        f"pi={target.pi_url}",
+        file=sys.stderr,
+    )
+
+    watch_dir = (
+        Path(args.frames_dir).expanduser().resolve()
+        if args.frames_dir else DEFAULT_WATCH_DIR
+    )
+    watch_dir.mkdir(parents=True, exist_ok=True)
+
+    store = FrameStore(watch_dir=watch_dir, max_frames=args.max_frames)
+    bus = LogBus()
+    context_factory = make_target_context_factory(
+        target, adapter, base_dir=watch_dir, bus=bus,
+    )
+    app = create_app(
+        context_factory, frame_store=store, bus=bus,
+    )
+
+    print(
+        f"handsneyes Command Center → http://{args.host}:{args.port}",
+        file=sys.stderr,
+    )
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    return 0
+
+
 _HANDLERS = {
     "do": _cmd_do,
     "platforms": _cmd_platforms,
     "targets": _cmd_targets,
     "vault": _cmd_vault,
     "version": _cmd_version,
+    "commandcenter": _cmd_commandcenter,
+    "cc": _cmd_commandcenter,
 }
 
 

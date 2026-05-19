@@ -1,4 +1,4 @@
-"""ControllerAgent — minimal rule planner for Phase A.
+"""Controller — rule planner + thin ControllerAgent over PlanExecutor.
 
 Decomposes free-form intents into a typed list of ``PlanStep`` rows.
 Phase A scope: enough rules to demonstrate end-to-end dispatching
@@ -123,3 +123,4 @@ def plan_intent(intent: str) -> list[PlanStep]:
         ]
 
     return []
+# ──────────────────────────────────────────────────────────────────────
