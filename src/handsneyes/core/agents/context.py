@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from handsneyes.core.vault import Vault
     from handsneyes.io.keyboard.base import KeyboardOutput
     from handsneyes.io.mouse.base import MouseOutput
+    from handsneyes.platforms.base import PlatformAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,12 @@ class AgentContext:
     # I/O — Pi-side HID
     mouse: MouseOutput | None = None
     keyboard: KeyboardOutput | None = None
+
+    # Per-target OS adapter. Holds OS-specific knowledge (shortcut
+    # remap, app launcher hotkeys, browser-focus recovery, per-OS
+    # model checkpoint locations). Optional so tests can build bare
+    # contexts; agents that need it document the requirement.
+    platform: PlatformAdapter | None = None
 
     # Vision input
     capture: WebcamCapture | None = None
