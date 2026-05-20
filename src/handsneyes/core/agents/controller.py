@@ -174,4 +174,72 @@ def plan_intent(intent: str) -> list[PlanStep]:
         ]
 
     return []
-# ──────────────────────────────────────────────────────────────────────
+
+
+# ─── ControllerAgent shim ───────────────────────────────────────────
+
+
+class ControllerAgent:
+    """Compose ``plan_intent`` + :class:`PlanExecutor` into the
+    one-shot entrypoint the Command Center runner expects.
+
+    Accepts (and ignores, for API parity) the legacy kwargs the
+    terminaleyes ControllerAgent took: ``no_focus``, ``vault_name``,
+    ``platform``, ``allow_llm_fallback``, ``planner``, ``ml_adapter``.
+    Honours ``dry_run`` (skips execution, returns the plan only).
+    """
+
+    name = "controller"
+
+    def __init__(self, ctx: Any) -> None:  # noqa: ANN401
+        self.ctx = ctx
+
+    async def run(
+        self,
+        *,
+        intent: str,
+        no_focus: bool = False,  # noqa: ARG002
+        vault_name: str | None = None,  # noqa: ARG002
+        platform: str = "linux",  # noqa: ARG002
+        dry_run: bool = False,
+        allow_llm_fallback: bool = True,  # noqa: ARG002
+        planner: str = "auto",  # noqa: ARG002
+        ml_adapter: object | None = None,  # noqa: ARG002
+        **_extra: object,
+    ) -> Any:  # noqa: ANN401
+        from handsneyes.core.agents.base import Outcome
+        from handsneyes.core.agents.executor import PlanExecutor
+
+        plan = plan_intent(intent)
+        plan_strs = [
+            f"{step.agent}({step.kwargs!r})" for step in plan
+        ]
+        if not plan:
+            return Outcome(
+                success=False,
+                reason=(
+                    "no rule matched this intent — rule-planner only; "
+                    "LLM fallback deferred"
+                ),
+                data={"plan": []},
+            )
+        if dry_run:
+            return Outcome(
+                success=True,
+                reason=f"planned {len(plan)} step(s) (dry-run)",
+                data={"plan": plan_strs, "dry_run": True},
+            )
+        executor = PlanExecutor(self.ctx)
+        results = await executor.run(plan)
+        all_ok = all(r.outcome.success for r in results)
+        return Outcome(
+            success=all_ok,
+            reason=(
+                f"{len(results)} step(s) executed; "
+                f"{'all-ok' if all_ok else 'first failure aborted plan'}"
+            ),
+            data={
+                "plan": plan_strs,
+                "results": [r.as_dict() for r in results],
+            },
+        )

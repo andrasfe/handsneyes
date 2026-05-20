@@ -108,7 +108,12 @@ class PlanExecutor:
     ) -> list[StepResult]:
         results: list[StepResult] = []
         for step in plan:
+            # Pre-step snapshot so the UI's frame pane has something to
+            # show. Agents that capture their own frames (verify, focus,
+            # navigate) drop additional frames in the same dir.
+            await self._snapshot(f"executor_pre_{step.agent}")
             outcome = await self._run_step(step)
+            await self._snapshot(f"executor_post_{step.agent}")
             results.append(StepResult(step=step, outcome=outcome))
             self.ctx.record_step(
                 intent=step.rationale or step.agent,
@@ -124,6 +129,16 @@ class PlanExecutor:
                 )
                 break
         return results
+
+    async def _snapshot(self, label: str) -> None:
+        """Best-effort frame capture; never raises into the executor."""
+        if self.ctx.capture is None:
+            return
+        try:
+            frame = await self.ctx.capture.capture_frame()
+            self.ctx.record_frame(frame.image, label=label)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("executor snapshot %s failed: %s", label, e)
 
     async def _run_step(self, step: PlanStep) -> Outcome:
         if step.agent == "key_combo":

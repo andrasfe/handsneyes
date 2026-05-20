@@ -124,8 +124,24 @@ class Runner:
             return record
 
     async def _execute(self, record: RunRecord) -> None:
-        # Late import: ControllerAgent pulls heavy deps.
-        from handsneyes.core.agents.controller import ControllerAgent
+        # Late import: ControllerAgent pulls heavy deps. Guard against
+        # import-time failure so the runner can never leave the record
+        # stuck in "running" (the bug the verbatim port shipped with).
+        try:
+            from handsneyes.core.agents.controller import ControllerAgent
+        except Exception as e:
+            record.status = "error"
+            record.reason = f"controller import failed: {e}"
+            record.ended_at = time.time()
+            self.bus.publish(LogEvent(
+                ts=time.time(), level="ERROR", source="system",
+                msg=f"! run {record.run_id} {record.reason}",
+                run_id=record.run_id,
+            ))
+            self.bus.close_run(record.run_id)
+            self._active = None
+            self._task = None
+            return
 
         bus = self.bus
         run_id = record.run_id

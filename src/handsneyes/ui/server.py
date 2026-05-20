@@ -289,10 +289,19 @@ def create_app(
     @app.get("/api/frames/latest")
     async def latest_frame(
         wait: int = Query(0, ge=0, le=1),
-        since: int | None = Query(None),
+        since: str | None = Query(None),
     ) -> JSONResponse:
+        # Tolerate empty string: the SPA passes `since=` when it has
+        # no known frame yet. Strict `int | None` 422s on the empty
+        # string and the long-poll loop pegs the server.
+        since_id: int | None = None
+        if since:
+            try:
+                since_id = int(since)
+            except ValueError:
+                since_id = None
         if wait:
-            meta = await store.wait_for_update(since)
+            meta = await store.wait_for_update(since_id)
         else:
             meta = store.latest()
         if meta is None:

@@ -96,8 +96,18 @@ def make_target_context_factory(
 
         capture = None
         try:
+            import asyncio as _asyncio
             capture = WebcamCapture(device_index=target.camera_index)
-            await capture.open()
+            # Hard cap: cv2.VideoCapture(N) on macOS can block forever
+            # when N points at a busy / phantom device. 10s is generous
+            # for a real USB webcam (the warmup loop also runs here).
+            await _asyncio.wait_for(capture.open(), timeout=10.0)
+        except _asyncio.TimeoutError:
+            logger.warning(
+                "webcam open exceeded 10s on device %d — running blind",
+                target.camera_index,
+            )
+            capture = None
         except Exception as e:
             logger.warning("webcam open failed (%s) — running blind", e)
             capture = None
