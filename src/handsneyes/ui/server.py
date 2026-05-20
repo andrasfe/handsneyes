@@ -732,7 +732,7 @@ def create_app(
         if runner.is_busy():
             raise HTTPException(409, "a run is currently in progress")
         # Late import: pulls heavy CV deps only when actually used.
-        from handsneyes.core.agents.login import _SessionAdapter
+        from handsneyes.core.vision.session_adapter import SessionAdapter as _SessionAdapter
         from handsneyes.core.vision.visual_servo_homer import (
             VisualServoHomer,
         )
@@ -966,7 +966,7 @@ def create_app(
         # Same fixture as click_at — context_factory builds a full
         # ctx, VisualServoHomer.home_to_pixel(click=False) lands
         # the cursor without firing a button, then mouse.scroll(...).
-        from handsneyes.core.agents.login import _SessionAdapter
+        from handsneyes.core.vision.session_adapter import SessionAdapter as _SessionAdapter
         from handsneyes.core.vision.visual_servo_homer import (
             VisualServoHomer,
         )
