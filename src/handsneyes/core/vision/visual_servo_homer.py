@@ -208,6 +208,11 @@ _POINTER_ACCEL_CHECKPOINT_CANDIDATES = (
     # the data ceiling that motivated the HSV cross-check fix).
     # v3+: direct inverse (single forward pass at runtime).
     # v1/v2: legacy forward models that the runtime Newton-inverts.
+    # Platform-bundled (handsneyes Phase B): ships with each adapter.
+    Path(__file__).resolve().parent.parent.parent
+        / "platforms" / "linux_gnome" / "models" / "pointer_accel",
+    # Legacy terminaleyes paths (for back-compat with users who
+    # retrained against the old data/ml layout).
     Path("data/ml/checkpoints/pointer_accel-v5"),
     Path("data/ml/checkpoints/pointer_accel-v4"),
     Path("data/ml/checkpoints/pointer_accel-v3"),
@@ -221,10 +226,11 @@ _POINTER_ACCEL_CHECKPOINT_CANDIDATES = (
 # target in one shot, before handing off to the standard closed-loop
 # servo for the small residual.
 _LONGJUMP_CHECKPOINT_CANDIDATES = (
-    # v2: retrained on chained-burst data — no scalar calibration.
+    # Platform-bundled (handsneyes Phase B).
+    Path(__file__).resolve().parent.parent.parent
+        / "platforms" / "linux_gnome" / "models" / "longjump",
+    # Legacy terminaleyes paths.
     Path("data/ml/checkpoints/longjump-v2"),
-    # v1: trained on slow-paced (per-step) trajectories; chained-
-    # burst runtime needs a ~0.85 calibration on both axes.
     Path("data/ml/checkpoints/longjump-v1"),
 )
 

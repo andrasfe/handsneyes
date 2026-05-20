@@ -1014,6 +1014,10 @@ const $btnPassEnter = document.getElementById("btn-passthrough-enter");
 const $btnPassTab = document.getElementById("btn-passthrough-tab");
 const $btnPassEsc = document.getElementById("btn-passthrough-esc");
 const $btnPassClear = document.getElementById("btn-passthrough-clear");
+const $btnPassUp = document.getElementById("btn-passthrough-up");
+const $btnPassDown = document.getElementById("btn-passthrough-down");
+const $btnPassLeft = document.getElementById("btn-passthrough-left");
+const $btnPassRight = document.getElementById("btn-passthrough-right");
 
 const _kbQueue = [];
 let _kbDraining = false;
@@ -1356,6 +1360,22 @@ if ($btnPassClear)
   $btnPassClear.addEventListener("click", () => {
     if ($passInput) $passInput.value = "";
   });
+
+// Arrow-key buttons — send the key directly without needing to focus
+// the passthrough field or hover over the screenshot.
+for (const [btn, key] of [
+  [$btnPassUp, "Up"],
+  [$btnPassDown, "Down"],
+  [$btnPassLeft, "Left"],
+  [$btnPassRight, "Right"],
+]) {
+  if (!btn) continue;
+  btn.addEventListener("click", () => {
+    _kbEnqueue({
+      path: "/api/keyboard/key", body: { key, modifiers: [] },
+    });
+  });
+}
 
 // ── paste-file: pick a local file, type it on the host ────────
 const $btnPasteFile = document.getElementById("btn-paste-file");
