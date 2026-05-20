@@ -379,8 +379,27 @@ def _cmd_commandcenter(args: argparse.Namespace) -> int:
     context_factory = make_target_context_factory(
         target, adapter, base_dir=watch_dir, bus=bus,
     )
+
+    # Settings-shape shim for the manual snapshot + commander_cfg paths
+    # in server.py. Those handlers were ported verbatim from
+    # terminaleyes' pydantic settings layer; handsneyes carries the
+    # equivalent state on Target + platform adapter, so we adapt here.
+    class _CaptureCfg:
+        device_index = target.camera_index
+        resolution_width, resolution_height = target.screen_size
+
+    class _CommanderCfg:
+        pi_base_url = target.pi_url
+        transport = target.transport
+        screen_width, screen_height = target.screen_size
+
+    class _Settings:
+        capture = _CaptureCfg()
+        commander = _CommanderCfg()
+
     app = create_app(
         context_factory, frame_store=store, bus=bus,
+        settings=_Settings(),
     )
 
     print(
