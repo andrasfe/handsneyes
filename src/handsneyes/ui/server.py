@@ -46,6 +46,17 @@ class RunRequest(BaseModel):
     intent: str = Field(min_length=1)
     no_focus: bool = False
     vault: str | None = None
+    # Direct unlock password (bypasses the vault chain). The cc UI's
+    # Unlock button uses this when the operator chooses "type it once"
+    # over "set up the vault" — no env var or terminal-side getpass
+    # required. Server treats it as opaque; LoginAgent receives it
+    # via the controller's threading and sends it through the
+    # secret=True keyboard path.
+    password: str | None = None
+    # Vault passphrase override. When set, the runner builds a Vault
+    # at request time and feeds it to the AgentContext, so LoginAgent
+    # can look up `vault` entries without a pre-set env passphrase.
+    vault_passphrase: str | None = None
     platform: str = "linux"
     dry_run: bool = False
     allow_llm_fallback: bool = True
@@ -342,6 +353,8 @@ def create_app(
                 intent=req.intent,
                 no_focus=req.no_focus,
                 vault=req.vault,
+                password=req.password,
+                vault_passphrase=req.vault_passphrase,
                 platform=req.platform,
                 dry_run=req.dry_run,
                 allow_llm_fallback=req.allow_llm_fallback,

@@ -41,11 +41,19 @@ class RunRecord:
     reason: str | None = None
     plan: list[str] = field(default_factory=list)
 
+    _SECRET_OPTS = frozenset({"password", "vault_passphrase"})
+
     def public(self) -> dict:
+        # Redact secrets — these stay in self.options for use during
+        # _execute but never leave the process through /api/runs.
+        public_opts = {
+            k: ("<redacted>" if k in self._SECRET_OPTS and v else v)
+            for k, v in self.options.items()
+        }
         return {
             "run_id": self.run_id,
             "intent": self.intent,
-            "options": self.options,
+            "options": public_opts,
             "status": self.status,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
@@ -91,6 +99,8 @@ class Runner:
         intent: str,
         no_focus: bool = False,
         vault: str | None = None,
+        password: str | None = None,
+        vault_passphrase: str | None = None,
         platform: str = "linux",
         dry_run: bool = False,
         allow_llm_fallback: bool = True,
@@ -108,6 +118,8 @@ class Runner:
                 intent=intent,
                 options={
                     "no_focus": no_focus, "vault": vault,
+                    "password": password,
+                    "vault_passphrase": vault_passphrase,
                     "platform": platform, "dry_run": dry_run,
                     "allow_llm_fallback": allow_llm_fallback,
                     "planner": planner, "ml_adapter": ml_adapter,
@@ -156,11 +168,25 @@ class Runner:
                  contextlib.redirect_stdout(out_stream), \
                  contextlib.redirect_stderr(err_stream):
                 ctx, keyboard, mouse, capture = await self._context_factory()
+                # Per-request vault passphrase override: lets the UI's
+                # Unlock button supply the passphrase inline instead
+                # of requiring an env var. Built fresh per run so
+                # passphrases never leak into the next request.
+                vp = record.options.get("vault_passphrase")
+                if vp:
+                    try:
+                        from handsneyes.core.vault import Vault
+                        ctx.vault = Vault(vp)
+                    except Exception as e:
+                        logger.warning(
+                            "vault_passphrase rejected: %s", e,
+                        )
                 agent = ControllerAgent(ctx)
                 outcome = await agent.run(
                     intent=record.intent,
                     no_focus=record.options["no_focus"],
                     vault_name=record.options["vault"],
+                    password=record.options.get("password"),
                     platform=record.options["platform"],
                     dry_run=record.options["dry_run"],
                     allow_llm_fallback=record.options["allow_llm_fallback"],

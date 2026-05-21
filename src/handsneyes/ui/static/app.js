@@ -476,11 +476,44 @@ $btnLock.addEventListener("click", () => {
   }, "lock the screen");
 });
 
+// Cache the vault passphrase for the cc session so the operator
+// types it once per cc restart, not once per Unlock click. Lives
+// only in this tab's JS heap — never persisted, never sent over the
+// wire except inline with each /api/run.
+let _vaultPassphraseCache = "";
+
 $btnUnlock.addEventListener("click", () => {
   const vault = ($optVault.value || "").trim();
   if (!vault) {
     appendSystemLog("ERROR", "Unlock requires a vault entry name");
     return;
+  }
+  // If the operator hasn't supplied a passphrase yet this session,
+  // prompt for it. Empty input means "just type the password
+  // directly" — we fall through to a second prompt.
+  if (!_vaultPassphraseCache) {
+    const vp = window.prompt(
+      `Vault passphrase for entry "${vault}"\n` +
+      "(Cancel to type the unlock password directly instead.)",
+    );
+    if (vp === null) {
+      // Operator chose direct-password path.
+      const pw = window.prompt(
+        `Unlock password for "${vault}"\n` +
+        "(Stored only for this run.)",
+      );
+      if (!pw) return;
+      startRun({
+        intent: "unlock the screen",
+        no_focus: true,
+        dry_run: $optDryRun.checked,
+        platform: $optPlatform.value,
+        vault,
+        password: pw,
+      }, "unlock the screen");
+      return;
+    }
+    _vaultPassphraseCache = vp;
   }
   startRun({
     intent: "unlock the screen",
@@ -488,6 +521,7 @@ $btnUnlock.addEventListener("click", () => {
     dry_run: $optDryRun.checked,
     platform: $optPlatform.value,
     vault,
+    vault_passphrase: _vaultPassphraseCache,
   }, "unlock the screen");
 });
 

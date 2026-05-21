@@ -41,7 +41,7 @@ def make_target_context_factory(
     base_dir: Path,
     bus=None,
     vision_base_url: str = "http://localhost:1234/v1",
-    vision_model: str = "nemotron-3-nano-omni",
+    vision_model: str = "nvidia/nemotron-3-nano-omni",
 ) -> Callable[[], Awaitable[tuple[Any, Any, Any, Any]]]:
     """Build a runner-compatible factory from a :class:`Target` + adapter.
 

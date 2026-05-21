@@ -200,6 +200,7 @@ class ControllerAgent:
         intent: str,
         no_focus: bool = False,  # noqa: ARG002
         vault_name: str | None = None,
+        password: str | None = None,
         platform: str = "linux",  # noqa: ARG002
         dry_run: bool = False,
         allow_llm_fallback: bool = True,  # noqa: ARG002
@@ -213,22 +214,35 @@ class ControllerAgent:
         from handsneyes.core.agents.executor import PlanExecutor
 
         plan = plan_intent(intent)
-        # Thread vault_name into any login step that doesn't already
-        # have one — the cc Unlock button passes the vault entry name
-        # alongside the intent, not in the intent string.
-        if vault_name:
-            plan = [
-                replace(
-                    step,
-                    kwargs={**step.kwargs, "vault_name": vault_name},
-                )
-                if step.agent == "login"
-                and "vault_name" not in step.kwargs
-                else step
-                for step in plan
-            ]
+        # Thread vault_name + direct password into any login step the
+        # planner produced. The cc Unlock button passes one or both
+        # alongside the intent, not in the intent string. Direct
+        # password wins over vault lookup if both are set.
+        if vault_name or password:
+            def _inject(step: PlanStep) -> PlanStep:
+                if step.agent != "login":
+                    return step
+                kw = dict(step.kwargs)
+                if password and "password" not in kw:
+                    kw["password"] = password
+                if vault_name and "vault_name" not in kw:
+                    kw["vault_name"] = vault_name
+                return replace(step, kwargs=kw)
+            plan = [_inject(s) for s in plan]
+        # Redact secrets when stringifying — the plan strings show up
+        # in /api/runs responses and the cc history pane. Never leak
+        # passwords through the public surface.
+        _SECRETS = frozenset({"password", "vault_passphrase"})
+
+        def _redact(kw: dict[str, Any]) -> dict[str, Any]:
+            return {
+                k: ("<redacted>" if k in _SECRETS and v else v)
+                for k, v in kw.items()
+            }
+
         plan_strs = [
-            f"{step.agent}({step.kwargs!r})" for step in plan
+            f"{step.agent}({_redact(step.kwargs)!r})"
+            for step in plan
         ]
         if not plan:
             return Outcome(
