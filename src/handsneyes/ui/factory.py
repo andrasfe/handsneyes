@@ -116,6 +116,25 @@ def make_target_context_factory(
             base_url=vision_base_url, api_key="not-needed",
         )
 
+        # Pre-build the Vault when a passphrase is available in the
+        # environment. The cc runs in a background asyncio task with
+        # no TTY, so getpass.getpass would block forever if LoginAgent
+        # tried to resolve a vault name without a pre-instantiated
+        # vault on ctx.
+        import os as _os
+        vault = None
+        if _os.environ.get("HANDSNEYES_VAULT_PASSPHRASE") is not None:
+            try:
+                from handsneyes.core.vault import Vault, get_passphrase
+                vault = Vault(get_passphrase())
+            except Exception as e:
+                logger.warning(
+                    "vault init failed (%s) — Unlock will fail "
+                    "until HANDSNEYES_VAULT_PASSPHRASE is set + "
+                    "`handsneyes vault add <name>` has been run",
+                    e,
+                )
+
         ctx = AgentContext(
             mouse=mouse,
             keyboard=keyboard,
@@ -123,6 +142,7 @@ def make_target_context_factory(
             vision_client=client,
             vision_model=vision_model,
             ocr_model=vision_model,
+            vault=vault,
             output_dir=output_dir,
             platform=adapter,
         )

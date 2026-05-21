@@ -199,7 +199,7 @@ class ControllerAgent:
         *,
         intent: str,
         no_focus: bool = False,  # noqa: ARG002
-        vault_name: str | None = None,  # noqa: ARG002
+        vault_name: str | None = None,
         platform: str = "linux",  # noqa: ARG002
         dry_run: bool = False,
         allow_llm_fallback: bool = True,  # noqa: ARG002
@@ -207,10 +207,26 @@ class ControllerAgent:
         ml_adapter: object | None = None,  # noqa: ARG002
         **_extra: object,
     ) -> Any:  # noqa: ANN401
+        from dataclasses import replace
+
         from handsneyes.core.agents.base import Outcome
         from handsneyes.core.agents.executor import PlanExecutor
 
         plan = plan_intent(intent)
+        # Thread vault_name into any login step that doesn't already
+        # have one — the cc Unlock button passes the vault entry name
+        # alongside the intent, not in the intent string.
+        if vault_name:
+            plan = [
+                replace(
+                    step,
+                    kwargs={**step.kwargs, "vault_name": vault_name},
+                )
+                if step.agent == "login"
+                and "vault_name" not in step.kwargs
+                else step
+                for step in plan
+            ]
         plan_strs = [
             f"{step.agent}({step.kwargs!r})" for step in plan
         ]

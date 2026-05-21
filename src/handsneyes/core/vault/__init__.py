@@ -35,7 +35,11 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 logger = logging.getLogger(__name__)
 
 
-MAGIC = b"HEVAULT1"  # 8 bytes
+MAGIC = b"HEVAULT1"  # 8 bytes — handsneyes magic
+# terminaleyes used "TEVAULT1" with otherwise-identical format. Read
+# both so an existing terminaleyes vault works without migration; new
+# writes always use HEVAULT1.
+_LEGACY_MAGICS = (b"TEVAULT1",)
 SALT_LEN = 16
 NONCE_LEN = 12
 KEY_LEN = 32
@@ -43,7 +47,22 @@ SCRYPT_N = 2 ** 15
 SCRYPT_R = 8
 SCRYPT_P = 1
 
-DEFAULT_PATH = Path.home() / ".config" / "handsneyes" / "vault.enc"
+
+def _default_path() -> Path:
+    """Resolve the vault file. Prefer the handsneyes path; fall back
+    to a pre-existing terminaleyes vault if the handsneyes file isn't
+    there yet (one-time migration: first write at the handsneyes path
+    leaves the terminaleyes file untouched as a backup)."""
+    primary = Path.home() / ".config" / "handsneyes" / "vault.enc"
+    if primary.exists():
+        return primary
+    legacy = Path.home() / ".config" / "terminaleyes" / "vault.enc"
+    if legacy.exists():
+        return legacy
+    return primary
+
+
+DEFAULT_PATH = _default_path()
 DEFAULT_DIR_MODE = 0o700
 DEFAULT_FILE_MODE = 0o600
 
@@ -62,16 +81,22 @@ def get_passphrase(*, prompt: str = "Vault passphrase: ") -> str:
     Order:
       1. ``HANDSNEYES_VAULT_PASSPHRASE`` env var (warn — leaks via
          the process env to anyone with ``ps -e ww`` or /proc access).
-      2. ``getpass.getpass`` prompt.
+      2. ``TERMINALEYES_VAULT_PASSPHRASE`` env var (back-compat with
+         the legacy terminaleyes setup so an existing operator env
+         keeps working without renaming the variable).
+      3. ``getpass.getpass`` prompt.
+
+    Empty strings are treated as "not set" — pass an empty value
+    explicitly to :class:`Vault` if that's what you want.
     """
-    env = os.environ.get("HANDSNEYES_VAULT_PASSPHRASE")
-    if env is not None:
-        logger.warning(
-            "Using HANDSNEYES_VAULT_PASSPHRASE from environment — "
-            "this is fine for scripting but visible to other processes "
-            "on this host."
-        )
-        return env
+    for var in ("HANDSNEYES_VAULT_PASSPHRASE", "TERMINALEYES_VAULT_PASSPHRASE"):
+        env = os.environ.get(var)
+        if env:
+            logger.warning(
+                "Using %s from environment — fine for scripting but "
+                "visible to other processes on this host.", var,
+            )
+            return env
     return getpass.getpass(prompt)
 
 
@@ -171,7 +196,8 @@ class Vault:
             raise VaultError(
                 f"Vault file {self._path} is too small to be valid"
             )
-        if blob[: len(MAGIC)] != MAGIC:
+        head = blob[: len(MAGIC)]
+        if head != MAGIC and head not in _LEGACY_MAGICS:
             raise VaultError(
                 f"Vault file {self._path} has wrong magic header"
             )
