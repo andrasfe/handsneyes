@@ -1,5 +1,5 @@
 {
-  "hidden": 48,
+  "hidden": 64,
   "direction": "inverse",
   "input_features": [
     "measured_dx_pct",
@@ -12,7 +12,7 @@
     "hid_dy_norm"
   ],
   "augmented": true,
-  "train_rows": 1048,
-  "val_rows": 18,
+  "train_rows": 1512,
+  "val_rows": 49,
   "platform": "ubuntu-libinput-adaptive"
 }
