@@ -136,6 +136,21 @@ class PasteFileRequest(BaseModel):
     body_readback: bool = False
 
 
+class SyncTextRequest(BaseModel):
+    # ROI centred on (x_pct, y_pct). Defaults to the last click_at
+    # position so just clicking into a text field is enough setup.
+    x_pct: float | None = Field(default=None, ge=0.0, le=1.0)
+    y_pct: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Half-height of the cropped band as a fraction of frame height.
+    # Default ±3% (so 6% total) covers a normal text input at typical
+    # UI density; bump up for wrapped textareas.
+    band_pct: float = Field(default=0.03, ge=0.005, le=0.2)
+    # Override the OCR model. Default uses nanonets-ocr-s (small,
+    # dedicated OCR model — much faster + more accurate on webcam
+    # captures than the general-purpose multimodal model).
+    model: str | None = None
+
+
 def _content_type_for(path: str) -> str:
     p = path.lower()
     if p.endswith(".png"):
@@ -1675,6 +1690,141 @@ def create_app(
             return JSONResponse({"ok": True, "wrote": wrote})
         await _snapshot_after_manual_action("manual_snapshot")
         return JSONResponse({"ok": True, "wrote": True})
+
+    @app.post("/api/sync-text-from-host")
+    async def sync_text_from_host(req: SyncTextRequest) -> JSONResponse:
+        """OCR the focused host text field, return its current content.
+
+        Used by the cc UI's passthrough mirror to recover from cursor-
+        only edits (arrow keys, mid-string Backspace) that don't move
+        enough pixels for the snapshot poll to fire. Defaults the
+        region of interest to the last click_at position so just
+        clicking into a text field is enough setup.
+        """
+        if runner.is_busy():
+            raise HTTPException(409, "a run is currently in progress")
+        if settings is None:
+            raise HTTPException(503, "no settings configured")
+
+        # Default ROI to last-clicked position (typical workflow:
+        # click into a field, arrow around, hit sync).
+        x_pct, y_pct = req.x_pct, req.y_pct
+        if y_pct is None:
+            cached = app.state.last_click_xy_at
+            if cached is not None:
+                (lx, ly), _ = cached
+                if x_pct is None:
+                    x_pct = lx
+                y_pct = ly
+
+        # One-shot capture — no poll-until-stable. Operator wants
+        # immediate text feedback.
+        async with _manual_capture_lock:
+            from handsneyes.core.capture.webcam import WebcamCapture
+            resolution = None
+            if (settings.capture.resolution_width
+                    and settings.capture.resolution_height):
+                resolution = (
+                    settings.capture.resolution_width,
+                    settings.capture.resolution_height,
+                )
+            cap = WebcamCapture(
+                device_index=settings.capture.device_index,
+                resolution=resolution,
+            )
+            try:
+                await asyncio.wait_for(cap.open(), timeout=10.0)
+                await asyncio.sleep(0.15)  # let cursor blink settle
+                frame = await cap.capture_frame()
+                image = frame.image
+            except Exception as e:
+                raise HTTPException(502, f"capture failed: {e}")
+            finally:
+                try:
+                    await cap.close()
+                except Exception:
+                    pass
+
+        # Optional ROI crop — much better OCR signal on a tight band.
+        if y_pct is not None:
+            h, _w = image.shape[:2]
+            band = max(20, int(req.band_pct * h))
+            y_center = int(y_pct * h)
+            y0 = max(0, y_center - band)
+            y1 = min(h, y_center + band)
+            if y1 - y0 >= 16:
+                image = image[y0:y1, :]
+
+        from handsneyes.core.vision.imaging import (
+            enhance_for_screen,
+            numpy_to_base64_png,
+            resize_for_mllm,
+        )
+        b64 = numpy_to_base64_png(
+            resize_for_mllm(
+                enhance_for_screen(image),
+                max_dimension=1280, min_dimension=512,
+            )
+        )
+
+        cfg = _commander_cfg()
+        base_url = getattr(
+            cfg, "lmstudio_base_url", "http://localhost:1234/v1",
+        )
+        model = req.model or "nanonets-ocr-s"
+
+        import httpx as _httpx
+        prompt = (
+            "You are an OCR system. The image shows a thin horizontal "
+            "strip of a computer screen centred on a text input field. "
+            "Return ONLY the exact text inside that input field. No "
+            "explanation, no quotes, no markdown — just the raw text. "
+            "If the field is empty, return an empty string. Do not "
+            "include surrounding UI labels or chrome."
+        )
+        try:
+            async with _httpx.AsyncClient(
+                base_url=base_url, timeout=30.0,
+            ) as client:
+                resp = await client.post(
+                    "/chat/completions",
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": prompt},
+                            {"role": "user", "content": [
+                                {"type": "image_url", "image_url": {
+                                    "url": f"data:image/png;base64,{b64}",
+                                }},
+                                {"type": "text", "text": (
+                                    "Text in the focused input field:"
+                                )},
+                            ]},
+                        ],
+                        "max_tokens": 500,
+                        "temperature": 0.0,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                text = (
+                    data["choices"][0]["message"]["content"] or ""
+                ).strip()
+                # Strip surrounding quotes the OCR model sometimes
+                # adds even when told not to.
+                if len(text) >= 2 and text[0] == text[-1] and text[0] in '"\'':
+                    text = text[1:-1]
+        except Exception as e:
+            raise HTTPException(502, f"OCR call failed: {e}")
+
+        return JSONResponse({
+            "ok": True, "text": text, "model": model,
+            "roi": (
+                {"x_pct": x_pct, "y_pct": y_pct,
+                 "band_pct": req.band_pct}
+                if y_pct is not None else None
+            ),
+        })
 
     @app.get("/api/state")
     def state() -> JSONResponse:

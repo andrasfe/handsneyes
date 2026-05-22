@@ -803,6 +803,10 @@ async function _fireHomingClick(x_pct, y_pct, clientX, clientY) {
     $passInput.value = "";
     $passInput.focus();
   }
+  // Auto-sync: OCR the field the operator just clicked into, so the
+  // passthrough mirror reflects any pre-existing host text. Fires in
+  // the background — does not block the click_at completion.
+  setTimeout(() => syncTextFromHost({ silent: true }), 250);
 }
 
 $frame.addEventListener("click", (e) => {
@@ -865,6 +869,7 @@ $frame.addEventListener("dblclick", async (e) => {
     $passInput.value = "";
     $passInput.focus();
   }
+  setTimeout(() => syncTextFromHost({ silent: true }), 250);
 });
 
 // Block the default context menu when right-clicking on the
@@ -1499,6 +1504,63 @@ for (const [btn, key] of [
     });
   });
 }
+
+// ── 📥 Sync from host: OCR the focused text field ───────────────
+// The passthrough field is a "write" mirror — it shows what was
+// typed via the cc UI, not what's actually in the host text input.
+// After arrow-key edits or after clicking into a field with pre-
+// existing content, the mirror is out of sync. This button calls
+// /api/sync-text-from-host which captures a fresh frame, crops a
+// thin band around the last click position, sends it to the
+// nanonets-ocr-s vision model, and returns the recognised text.
+const $btnPassSync = document.getElementById("btn-passthrough-sync");
+
+async function syncTextFromHost(opts = {}) {
+  // opts: { silent: bool } — silent suppresses the spinner/log,
+  // used by the auto-fire after click_at.
+  if (!$btnPassSync) return;
+  const silent = !!opts.silent;
+  if (!silent) {
+    if ($btnPassSync.disabled) return;
+    $btnPassSync.disabled = true;
+    $btnPassSync.classList.add("spinning");
+  }
+  try {
+    const r = await fetch("/api/sync-text-from-host", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (!r.ok) {
+      if (!silent) {
+        const t = await r.text().catch(() => "");
+        appendSystemLog("ERROR", `sync failed: ${r.status} ${t}`);
+      }
+      return;
+    }
+    const data = await r.json();
+    if (data && data.ok && typeof data.text === "string") {
+      $passInput.value = data.text;
+      _setCaret(data.text.length);
+      try { $passInput.focus(); } catch (_) {}
+      if (!silent) {
+        appendSystemLog(
+          "INFO",
+          `synced text from host (${data.text.length} chars)`,
+        );
+      }
+    }
+  } catch (e) {
+    if (!silent) appendSystemLog("ERROR", `sync error: ${e}`);
+  } finally {
+    if (!silent && $btnPassSync) {
+      $btnPassSync.disabled = false;
+      $btnPassSync.classList.remove("spinning");
+    }
+  }
+}
+
+if ($btnPassSync) $btnPassSync.addEventListener("click", () => syncTextFromHost());
 
 // ── paste-file: pick a local file, type it on the host ────────
 const $btnPasteFile = document.getElementById("btn-paste-file");
