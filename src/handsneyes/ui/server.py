@@ -142,6 +142,20 @@ class PasteFileRequest(BaseModel):
     body_readback: bool = False
 
 
+class VaultCreateRequest(BaseModel):
+    # New master passphrase for the fresh vault.
+    passphrase: str = Field(min_length=1, max_length=512)
+    # Entry name + value to seed the new vault with. Typically the
+    # operator creates the vault and the unlock entry in one shot.
+    entry_name: str = Field(min_length=1, max_length=128)
+    entry_value: str = Field(min_length=1, max_length=4096)
+    # Refuse if a vault file already exists, unless overwrite=True.
+    # The cc UI's "Create new vault" tab sets overwrite=True after
+    # showing a confirmation; programmatic callers should default
+    # to the safe behaviour.
+    overwrite: bool = False
+
+
 class SyncTextRequest(BaseModel):
     # ROI centred on (x_pct, y_pct). Defaults to the last click_at
     # position so just clicking into a text field is enough setup.
@@ -1831,6 +1845,65 @@ def create_app(
                  "band_pct": req.band_pct}
                 if y_pct is not None else None
             ),
+        })
+
+    @app.post("/api/vault/create")
+    async def vault_create(req: VaultCreateRequest) -> JSONResponse:
+        """Create a fresh vault file with one seed entry.
+
+        Wipes any existing vault when ``overwrite=True``. Used by the
+        cc UI's "Create new vault" tab in the Unlock modal — gives
+        operators who forgot the master passphrase a one-click reset
+        path without dropping to a terminal.
+        """
+        if runner.is_busy():
+            raise HTTPException(409, "a run is currently in progress")
+        from handsneyes.core.vault import DEFAULT_PATH, Vault
+
+        path = DEFAULT_PATH
+        # If DEFAULT_PATH resolved to the legacy terminaleyes location
+        # (the fallback in vault/__init__.py), we want to create the
+        # NEW vault at the handsneyes path so the legacy file is
+        # untouched and the next read picks up our fresh one.
+        from pathlib import Path as _Path
+        handsneyes_dir = _Path.home() / ".config" / "handsneyes"
+        path = handsneyes_dir / "vault.enc"
+
+        if path.exists() and not req.overwrite:
+            raise HTTPException(
+                409,
+                f"vault file already exists at {path} — pass "
+                f"overwrite=true to replace it",
+            )
+
+        # Make sure the legacy terminaleyes vault doesn't shadow our
+        # new one (vault loader prefers handsneyes path first, so a
+        # leftover legacy file is harmless but we delete it on
+        # overwrite for cleanliness).
+        legacy = _Path.home() / ".config" / "terminaleyes" / "vault.enc"
+        try:
+            handsneyes_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError as e:
+            raise HTTPException(500, f"could not create vault dir: {e}")
+
+        if req.overwrite:
+            for p in (path, legacy):
+                try:
+                    if p.exists():
+                        p.unlink()
+                except OSError as e:
+                    logger.warning("could not remove %s: %s", p, e)
+
+        try:
+            vault = Vault(req.passphrase, path=path)
+            vault.set(req.entry_name, req.entry_value)
+        except Exception as e:
+            raise HTTPException(502, f"vault creation failed: {e}")
+
+        return JSONResponse({
+            "ok": True,
+            "path": str(path),
+            "entry_name": req.entry_name,
         })
 
     @app.get("/api/state")

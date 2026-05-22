@@ -514,11 +514,17 @@ const $unlockCancel = document.getElementById("unlock-modal-cancel");
 const $unlockSubmit = document.getElementById("unlock-modal-submit");
 const $unlockTabVault = document.getElementById("unlock-tab-vault");
 const $unlockTabDirect = document.getElementById("unlock-tab-direct");
+const $unlockTabCreate = document.getElementById("unlock-tab-create");
 const $unlockPaneVault = document.getElementById("unlock-pane-vault");
 const $unlockPaneDirect = document.getElementById("unlock-pane-direct");
+const $unlockPaneCreate = document.getElementById("unlock-pane-create");
 const $unlockVaultName = document.getElementById("unlock-vault-name");
 const $unlockVaultPass = document.getElementById("unlock-vault-pass");
 const $unlockDirectPass = document.getElementById("unlock-direct-pass");
+const $unlockCreatePass1 = document.getElementById("unlock-create-pass1");
+const $unlockCreatePass2 = document.getElementById("unlock-create-pass2");
+const $unlockCreateEntryName = document.getElementById("unlock-create-entry-name");
+const $unlockCreateEntryValue = document.getElementById("unlock-create-entry-value");
 const $unlockSkipVerify = document.getElementById("unlock-skip-verify");
 
 let _unlockMode = "vault";   // "vault" | "direct"
@@ -550,31 +556,102 @@ function _closeUnlockModal() {
   if (!$unlockModal) return;
   $unlockModal.classList.add("hidden");
   $unlockModal.setAttribute("aria-hidden", "true");
-  // Wipe the direct-password input regardless of how we closed —
-  // never leave plaintext in the DOM longer than necessary. The
-  // vault passphrase field is also wiped on close; it's reloaded
-  // from cache the next time the modal opens.
+  // Wipe all password fields regardless of how we closed — never
+  // leave plaintext in the DOM longer than necessary. The vault
+  // passphrase field is reloaded from cache on next open.
   if ($unlockDirectPass) $unlockDirectPass.value = "";
   if ($unlockVaultPass) $unlockVaultPass.value = "";
+  if ($unlockCreatePass1) $unlockCreatePass1.value = "";
+  if ($unlockCreatePass2) $unlockCreatePass2.value = "";
+  if ($unlockCreateEntryValue) $unlockCreateEntryValue.value = "";
 }
 
 function _setUnlockMode(mode) {
   _unlockMode = mode;
   $unlockTabVault.classList.toggle("active", mode === "vault");
   $unlockTabDirect.classList.toggle("active", mode === "direct");
+  if ($unlockTabCreate) $unlockTabCreate.classList.toggle("active", mode === "create");
   $unlockPaneVault.classList.toggle("hidden", mode !== "vault");
   $unlockPaneDirect.classList.toggle("hidden", mode !== "direct");
+  if ($unlockPaneCreate) $unlockPaneCreate.classList.toggle("hidden", mode !== "create");
 }
 
 if ($unlockTabVault) $unlockTabVault.addEventListener("click", () => _setUnlockMode("vault"));
 if ($unlockTabDirect) $unlockTabDirect.addEventListener("click", () => _setUnlockMode("direct"));
+if ($unlockTabCreate) $unlockTabCreate.addEventListener("click", () => _setUnlockMode("create"));
 if ($unlockClose) $unlockClose.addEventListener("click", _closeUnlockModal);
 if ($unlockCancel) $unlockCancel.addEventListener("click", _closeUnlockModal);
 
-function _submitUnlock() {
-  const vault = ($unlockVaultName.value || "").trim();
+async function _submitUnlock() {
   const skipVerify = !!($unlockSkipVerify && $unlockSkipVerify.checked);
   _unlockSkipVerifyDefault = skipVerify;  // session-sticky
+
+  // ── create-vault tab ───────────────────────────────────────
+  if (_unlockMode === "create") {
+    const p1 = $unlockCreatePass1.value;
+    const p2 = $unlockCreatePass2.value;
+    const entryName = ($unlockCreateEntryName.value || "").trim();
+    const entryValue = $unlockCreateEntryValue.value;
+    if (!p1 || !p2) {
+      appendSystemLog("ERROR", "Unlock: master passphrase required (both fields)");
+      return;
+    }
+    if (p1 !== p2) {
+      appendSystemLog("ERROR", "Unlock: passphrase confirmation does not match");
+      return;
+    }
+    if (!entryName) {
+      appendSystemLog("ERROR", "Unlock: entry name required");
+      return;
+    }
+    if (!entryValue) {
+      appendSystemLog("ERROR", "Unlock: unlock password required");
+      return;
+    }
+    appendSystemLog("INFO", `creating fresh vault with entry "${entryName}"…`);
+    try {
+      const r = await fetch("/api/vault/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          passphrase: p1,
+          entry_name: entryName,
+          entry_value: entryValue,
+          overwrite: true,
+        }),
+      });
+      if (!r.ok) {
+        const t = await r.text().catch(() => "");
+        appendSystemLog("ERROR", `vault create failed: ${r.status} ${t}`);
+        return;
+      }
+      const data = await r.json();
+      appendSystemLog(
+        "INFO",
+        `vault created at ${data.path} with entry ${data.entry_name}`,
+      );
+    } catch (e) {
+      appendSystemLog("ERROR", `vault create error: ${e}`);
+      return;
+    }
+    // Cache the freshly-set passphrase so the next Unlock click
+    // can fire straight through the vault path.
+    _vaultPassphraseCache = p1;
+    if ($optVault) $optVault.value = entryName;
+    _closeUnlockModal();
+    startRun({
+      intent: "unlock the screen",
+      no_focus: true,
+      dry_run: $optDryRun.checked,
+      platform: $optPlatform.value,
+      vault: entryName,
+      vault_passphrase: p1,
+      skip_verify: skipVerify,
+    }, "unlock the screen");
+    return;
+  }
+
+  const vault = ($unlockVaultName.value || "").trim();
   if (_unlockMode === "vault") {
     const vp = $unlockVaultPass.value;
     if (!vault) {
@@ -619,8 +696,12 @@ function _submitUnlock() {
 
 if ($unlockSubmit) $unlockSubmit.addEventListener("click", _submitUnlock);
 
-// Enter submits from either password field; Esc cancels.
-for (const inp of [$unlockVaultPass, $unlockDirectPass, $unlockVaultName]) {
+// Enter submits from any password field; Esc cancels.
+for (const inp of [
+  $unlockVaultPass, $unlockDirectPass, $unlockVaultName,
+  $unlockCreatePass1, $unlockCreatePass2,
+  $unlockCreateEntryName, $unlockCreateEntryValue,
+]) {
   if (!inp) continue;
   inp.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {

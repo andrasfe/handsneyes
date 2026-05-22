@@ -162,6 +162,7 @@
         <div class="unlock-tabs">
           <button id="unlock-tab-vault" type="button" class="unlock-tab active">via vault</button>
           <button id="unlock-tab-direct" type="button" class="unlock-tab">type directly</button>
+          <button id="unlock-tab-create" type="button" class="unlock-tab">create new vault</button>
         </div>
         <div id="unlock-pane-vault" class="unlock-pane">
           <label class="modal-label">Vault entry name
@@ -184,6 +185,27 @@
           <p class="modal-hint">
             Typed only — never persisted, never written to disk,
             redacted from /api/runs.
+          </p>
+        </div>
+        <div id="unlock-pane-create" class="unlock-pane hidden">
+          <label class="modal-label">New vault master passphrase
+            <input id="unlock-create-pass1" type="password" autocomplete="off" />
+          </label>
+          <label class="modal-label">Confirm new passphrase
+            <input id="unlock-create-pass2" type="password" autocomplete="off" />
+          </label>
+          <label class="modal-label">Entry name
+            <input id="unlock-create-entry-name" type="text" autocomplete="off" value="desktop" />
+          </label>
+          <label class="modal-label">Unlock password to store under this entry
+            <input id="unlock-create-entry-value" type="password" autocomplete="off" />
+          </label>
+          <p class="modal-hint">
+            ⚠ Submitting will <strong>overwrite</strong> any existing
+            vault at ~/.config/handsneyes/vault.enc (and remove the
+            legacy ~/.config/terminaleyes/vault.enc). All previously
+            stored entries will be lost. After creation, the unlock
+            run fires automatically using the new entry.
           </p>
         </div>
         <label class="modal-label" style="flex-direction: row; align-items: center; gap: 8px;">
