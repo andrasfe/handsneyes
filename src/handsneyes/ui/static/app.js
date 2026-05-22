@@ -1229,28 +1229,18 @@ function _passthroughHandleKey(e) {
   if (hasAlt) mods.push("alt");
   if (hasShift) mods.push("shift");
 
-  // Only mirror keystrokes into $passInput when it's the focused
-  // field — otherwise hovering the image and typing accumulates
-  // invisible text that surprises the operator later.
-  const isPassInputFocused = document.activeElement === $passInput;
-
+  // Mirror locally regardless of focus: the operator wants to see
+  // what they typed, whether they were focused on the passthrough
+  // field or hovering over the screenshot with global capture
+  // active. The mirror is purely visual — the host has already
+  // received the literal keystroke via /api/keyboard above.
   const special = _PASS_SPECIAL[e.key];
   if (special) {
     _kbEnqueue({
       path: "/api/keyboard/key",
       body: { key: special, modifiers: mods },
     });
-    if (isPassInputFocused) {
-      if (special === "Backspace") {
-        $passInput.value = $passInput.value.slice(0, -1);
-      } else if (special === "Enter") {
-        $passInput.value = "";
-      } else if (special === "Tab") {
-        $passInput.value += "\t";
-      } else if (special === "Escape") {
-        $passInput.value = "";
-      }
-    }
+    _applySpecialLocally(special, hasShift);
     return;
   }
 
@@ -1263,13 +1253,112 @@ function _passthroughHandleKey(e) {
         path: "/api/keyboard/key",
         body: { key: e.key.toLowerCase(), modifiers: mods },
       });
+      // Local mirror of shortcut-letter chords would mislead more
+      // than it helps (Ctrl-A locally selects, but on the host it
+      // depends on the focused app). Leave the field alone.
       return;
     }
     _kbEnqueue({
       path: "/api/keyboard/text",
       body: { text: e.key },
     });
-    if (isPassInputFocused) $passInput.value += e.key;
+    _insertCharLocally(e.key);
+  }
+}
+
+// ── Local-mirror caret editing ────────────────────────────────────
+// The passthrough field's keydown listener calls preventDefault() on
+// every key (so the host receives the literal keystroke, not the
+// browser's interpretation). That intercepts the browser's built-in
+// caret + edit handling, so without this we'd have:
+//   - Left/Right arrow do nothing locally
+//   - Backspace always deletes from the end
+//   - Typing mid-string appends to the end
+// These helpers re-apply the navigation/edit on the local <input>
+// so the operator sees the same caret + text the host is receiving.
+
+function _setCaret(start, end) {
+  if (end === undefined) end = start;
+  try {
+    $passInput.setSelectionRange(start, end);
+  } catch (_) {}
+}
+
+function _getCaret() {
+  return {
+    start: $passInput.selectionStart ?? $passInput.value.length,
+    end:   $passInput.selectionEnd   ?? $passInput.value.length,
+  };
+}
+
+function _insertCharLocally(ch) {
+  const { start, end } = _getCaret();
+  const v = $passInput.value;
+  $passInput.value = v.slice(0, start) + ch + v.slice(end);
+  _setCaret(start + ch.length);
+}
+
+function _applySpecialLocally(special, hasShift) {
+  const v = $passInput.value;
+  const { start, end } = _getCaret();
+  switch (special) {
+    case "Backspace": {
+      if (start !== end) {
+        $passInput.value = v.slice(0, start) + v.slice(end);
+        _setCaret(start);
+      } else if (start > 0) {
+        $passInput.value = v.slice(0, start - 1) + v.slice(start);
+        _setCaret(start - 1);
+      }
+      return;
+    }
+    case "Delete": {
+      if (start !== end) {
+        $passInput.value = v.slice(0, start) + v.slice(end);
+        _setCaret(start);
+      } else if (start < v.length) {
+        $passInput.value = v.slice(0, start) + v.slice(start + 1);
+        _setCaret(start);
+      }
+      return;
+    }
+    case "Left": {
+      if (hasShift) _setCaret(Math.max(0, start - 1), end);
+      else if (start !== end) _setCaret(Math.min(start, end));
+      else _setCaret(Math.max(0, start - 1));
+      return;
+    }
+    case "Right": {
+      if (hasShift) _setCaret(start, Math.min(v.length, end + 1));
+      else if (start !== end) _setCaret(Math.max(start, end));
+      else _setCaret(Math.min(v.length, start + 1));
+      return;
+    }
+    case "Home": {
+      if (hasShift) _setCaret(0, end);
+      else _setCaret(0);
+      return;
+    }
+    case "End": {
+      if (hasShift) _setCaret(start, v.length);
+      else _setCaret(v.length);
+      return;
+    }
+    case "Tab": {
+      $passInput.value = v.slice(0, start) + "\t" + v.slice(end);
+      _setCaret(start + 1);
+      return;
+    }
+    case "Enter":
+    case "Escape": {
+      // Both reset the local buffer — the host has consumed what we
+      // had, the local field starts over.
+      $passInput.value = "";
+      _setCaret(0);
+      return;
+    }
+    // Up / Down / PageUp / PageDown have no meaningful single-line
+    // input editing — leave the local field untouched.
   }
 }
 
