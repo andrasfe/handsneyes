@@ -185,6 +185,11 @@ def main() -> int:
 
     n = Xtr.shape[0]
     rng = np.random.default_rng(0)
+    # Track the best-val checkpoint so we save the early-stopping
+    # weights, not the last-epoch weights (which often overfit when
+    # the dataset is small).
+    best_val = float("inf")
+    best_weights = None
     for epoch in range(1, args.epochs + 1):
         idx = rng.permutation(n)
         epoch_loss = 0.0
@@ -198,26 +203,51 @@ def main() -> int:
             mx.eval(model.parameters(), opt.state)
             epoch_loss += float(loss)
             n_batches += 1
+        # Track val + snapshot best weights every epoch (cheap).
+        if Xv is not None and Xv.shape[0] > 0:
+            vl = float(loss_fn(model, mx.array(Xv), mx.array(Yv)))
+            if vl < best_val:
+                best_val = vl
+                best_weights = {
+                    "fc1.weight": np.array(model.fc1.weight),
+                    "fc1.bias":   np.array(model.fc1.bias),
+                    "fc2.weight": np.array(model.fc2.weight),
+                    "fc2.bias":   np.array(model.fc2.bias),
+                    "fc3.weight": np.array(model.fc3.weight),
+                    "fc3.bias":   np.array(model.fc3.bias),
+                    "_epoch": epoch,
+                }
+        else:
+            vl = None
         if epoch % max(1, args.epochs // 20) == 0 or epoch == 1:
             tr = epoch_loss / max(1, n_batches)
             line = f"  epoch {epoch:>4d}/{args.epochs}  train_mse={tr:.6f}"
-            if Xv is not None and Xv.shape[0] > 0:
-                vl = float(loss_fn(model, mx.array(Xv), mx.array(Yv)))
+            if vl is not None:
                 line += f"  val_mse={vl:.6f}"
+                line += f"  best_val={best_val:.6f}@{best_weights['_epoch'] if best_weights else '-'}"
             print(line)
 
     # Persist weights as a tiny safetensors / numpy bundle. We use a
     # simple dict so the runtime wrapper doesn't need mlx_lm's
     # heavier checkpoint utilities.
     args.output.mkdir(parents=True, exist_ok=True)
-    weights = {
-        f"fc1.weight": np.array(model.fc1.weight),
-        f"fc1.bias":   np.array(model.fc1.bias),
-        f"fc2.weight": np.array(model.fc2.weight),
-        f"fc2.bias":   np.array(model.fc2.bias),
-        f"fc3.weight": np.array(model.fc3.weight),
-        f"fc3.bias":   np.array(model.fc3.bias),
-    }
+    # Prefer the best-val checkpoint when we have validation data.
+    if best_weights is not None:
+        print(
+            f"saving best-val checkpoint from epoch "
+            f"{best_weights['_epoch']} (val_mse={best_val:.6f}) "
+            f"instead of last-epoch weights"
+        )
+        weights = {k: v for k, v in best_weights.items() if k != "_epoch"}
+    else:
+        weights = {
+            "fc1.weight": np.array(model.fc1.weight),
+            "fc1.bias":   np.array(model.fc1.bias),
+            "fc2.weight": np.array(model.fc2.weight),
+            "fc2.bias":   np.array(model.fc2.bias),
+            "fc3.weight": np.array(model.fc3.weight),
+            "fc3.bias":   np.array(model.fc3.bias),
+        }
     np.savez(str(args.output / "weights.npz"), **weights)
     if args.inverse:
         input_features = [
