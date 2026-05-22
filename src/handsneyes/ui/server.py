@@ -57,6 +57,12 @@ class RunRequest(BaseModel):
     # at request time and feeds it to the AgentContext, so LoginAgent
     # can look up `vault` entries without a pre-set env passphrase.
     vault_passphrase: str | None = None
+    # Skip the LoginAgent's visual lock-screen verify and just type
+    # the password. Useful when the webcam is unavailable / fooled
+    # (e.g. the macOS SMPTE-bars placeholder makes the vision LLM
+    # hallucinate a yes). Operator's eyes-on-target — they're
+    # asserting the target IS on a lock screen.
+    skip_verify: bool = False
     platform: str = "linux"
     dry_run: bool = False
     allow_llm_fallback: bool = True
@@ -370,6 +376,7 @@ def create_app(
                 vault=req.vault,
                 password=req.password,
                 vault_passphrase=req.vault_passphrase,
+                skip_verify=req.skip_verify,
                 platform=req.platform,
                 dry_run=req.dry_run,
                 allow_llm_fallback=req.allow_llm_fallback,

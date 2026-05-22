@@ -498,6 +498,7 @@ const $unlockPaneDirect = document.getElementById("unlock-pane-direct");
 const $unlockVaultName = document.getElementById("unlock-vault-name");
 const $unlockVaultPass = document.getElementById("unlock-vault-pass");
 const $unlockDirectPass = document.getElementById("unlock-direct-pass");
+const $unlockSkipVerify = document.getElementById("unlock-skip-verify");
 
 let _unlockMode = "vault";   // "vault" | "direct"
 
@@ -539,6 +540,7 @@ if ($unlockCancel) $unlockCancel.addEventListener("click", _closeUnlockModal);
 
 function _submitUnlock() {
   const vault = ($unlockVaultName.value || "").trim();
+  const skipVerify = !!($unlockSkipVerify && $unlockSkipVerify.checked);
   if (_unlockMode === "vault") {
     const vp = $unlockVaultPass.value;
     if (!vault) {
@@ -550,7 +552,6 @@ function _submitUnlock() {
       return;
     }
     _vaultPassphraseCache = vp;
-    // Mirror back into the Lock/Unlock row for visibility.
     if ($optVault) $optVault.value = vault;
     _closeUnlockModal();
     startRun({
@@ -560,6 +561,7 @@ function _submitUnlock() {
       platform: $optPlatform.value,
       vault,
       vault_passphrase: _vaultPassphraseCache,
+      skip_verify: skipVerify,
     }, "unlock the screen");
   } else {
     const pw = $unlockDirectPass.value;
@@ -576,6 +578,7 @@ function _submitUnlock() {
       platform: $optPlatform.value,
       vault,
       password: pw,
+      skip_verify: skipVerify,
     }, "unlock the screen");
   }
 }

@@ -201,6 +201,7 @@ class ControllerAgent:
         no_focus: bool = False,  # noqa: ARG002
         vault_name: str | None = None,
         password: str | None = None,
+        skip_verify: bool = False,
         platform: str = "linux",  # noqa: ARG002
         dry_run: bool = False,
         allow_llm_fallback: bool = True,  # noqa: ARG002
@@ -218,7 +219,7 @@ class ControllerAgent:
         # planner produced. The cc Unlock button passes one or both
         # alongside the intent, not in the intent string. Direct
         # password wins over vault lookup if both are set.
-        if vault_name or password:
+        if vault_name or password or skip_verify:
             def _inject(step: PlanStep) -> PlanStep:
                 if step.agent != "login":
                     return step
@@ -227,6 +228,10 @@ class ControllerAgent:
                     kw["password"] = password
                 if vault_name and "vault_name" not in kw:
                     kw["vault_name"] = vault_name
+                if skip_verify and "verify" not in kw:
+                    # LoginAgent.verify=False skips the polled visual
+                    # lock-screen check. Operator's eyes-on-target.
+                    kw["verify"] = False
                 return replace(step, kwargs=kw)
             plan = [_inject(s) for s in plan]
         # Redact secrets when stringifying — the plan strings show up
