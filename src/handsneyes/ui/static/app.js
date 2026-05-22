@@ -361,6 +361,27 @@ async function pollRunStatus(runId) {
         if ($btnLock) $btnLock.disabled = false;
         if ($btnUnlock) $btnUnlock.disabled = false;
         if ($btnExecScript) $btnExecScript.disabled = false;
+        // Invalidate the cached vault passphrase when any unlock
+        // run fails. The most common cause is "wrong passphrase
+        // typed earlier this session" — leaving the wrong cache
+        // around used to silently feed every subsequent Unlock
+        // click (the top-level rec.reason doesn't always mention
+        // "vault" — that detail is in the step-level executor log
+        // — so we can't filter on the reason text). Always clear
+        // on failure: forces a fresh modal entry, which is harmless
+        // for non-vault-related failures (cache was already empty
+        // before the run started).
+        if (rec.status !== "succeeded"
+            && rec.intent && rec.intent.includes("unlock")
+            && _vaultPassphraseCache) {
+          _vaultPassphraseCache = "";
+          appendSystemLog(
+            "WARN",
+            "Cleared cached vault passphrase — last unlock attempt "
+            + "failed. Try again with the correct passphrase, or "
+            + "switch to direct-password.",
+          );
+        }
         return;
       }
     } catch (_) {}
@@ -502,11 +523,20 @@ const $unlockSkipVerify = document.getElementById("unlock-skip-verify");
 
 let _unlockMode = "vault";   // "vault" | "direct"
 
+// Session-sticky state for the modal.
+let _unlockSkipVerifyDefault = false;
+
 function _openUnlockModal() {
   if (!$unlockModal) return;
   $unlockVaultName.value = ($optVault.value || "").trim() || "desktop";
+  // Pre-fill vault passphrase from cache as a convenience, but the
+  // operator can edit / clear it. We never skip the modal — that
+  // path traps the operator when the cached value turns out to be
+  // wrong (see git log around the "I don't remember the vault
+  // passcode" thread).
   $unlockVaultPass.value = _vaultPassphraseCache || "";
   $unlockDirectPass.value = "";
+  if ($unlockSkipVerify) $unlockSkipVerify.checked = _unlockSkipVerifyDefault;
   _setUnlockMode(_unlockMode);
   $unlockModal.classList.remove("hidden");
   $unlockModal.setAttribute("aria-hidden", "false");
@@ -520,9 +550,12 @@ function _closeUnlockModal() {
   if (!$unlockModal) return;
   $unlockModal.classList.add("hidden");
   $unlockModal.setAttribute("aria-hidden", "true");
-  // Wipe the direct-password input regardless of how we closed;
-  // never leave plaintext in the DOM longer than necessary.
+  // Wipe the direct-password input regardless of how we closed —
+  // never leave plaintext in the DOM longer than necessary. The
+  // vault passphrase field is also wiped on close; it's reloaded
+  // from cache the next time the modal opens.
   if ($unlockDirectPass) $unlockDirectPass.value = "";
+  if ($unlockVaultPass) $unlockVaultPass.value = "";
 }
 
 function _setUnlockMode(mode) {
@@ -541,6 +574,7 @@ if ($unlockCancel) $unlockCancel.addEventListener("click", _closeUnlockModal);
 function _submitUnlock() {
   const vault = ($unlockVaultName.value || "").trim();
   const skipVerify = !!($unlockSkipVerify && $unlockSkipVerify.checked);
+  _unlockSkipVerifyDefault = skipVerify;  // session-sticky
   if (_unlockMode === "vault") {
     const vp = $unlockVaultPass.value;
     if (!vault) {
@@ -607,22 +641,12 @@ $btnUnlock.addEventListener("click", () => {
     );
     return;
   }
-  // If we already have a cached passphrase this session, skip the
-  // modal and fire straight through. The Lock/Unlock row's vault
-  // field is the source of truth for the entry name.
-  const vault = ($optVault.value || "").trim();
-  if (_vaultPassphraseCache && vault) {
-    startRun({
-      intent: "unlock the screen",
-      no_focus: true,
-      dry_run: $optDryRun.checked,
-      platform: $optPlatform.value,
-      vault,
-      vault_passphrase: _vaultPassphraseCache,
-    }, "unlock the screen");
-    return;
-  }
-  // First Unlock this session — show the modal.
+  // Always show the modal. Cached passphrase pre-fills the field
+  // for convenience; modal stays open so the operator can edit it
+  // or switch tabs. The earlier "cached value silently bypasses
+  // the modal" optimization trapped operators when the cache was
+  // wrong (no way to switch to direct-password or change the
+  // passphrase without reloading the page).
   _openUnlockModal();
 });
 
