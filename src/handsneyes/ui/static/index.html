@@ -148,6 +148,52 @@
     </div>
   </main>
 
+  <!-- Unlock modal: lets the operator supply either a vault
+       passphrase (to unlock-via-vault-lookup) or a direct password
+       (to skip the vault entirely). Replaces window.prompt() which
+       got silently blocked in some browsers. -->
+  <div id="unlock-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-card">
+      <div class="modal-header">
+        <span>Unlock — supply password</span>
+        <button id="unlock-modal-close" type="button" title="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="unlock-tabs">
+          <button id="unlock-tab-vault" type="button" class="unlock-tab active">via vault</button>
+          <button id="unlock-tab-direct" type="button" class="unlock-tab">type directly</button>
+        </div>
+        <div id="unlock-pane-vault" class="unlock-pane">
+          <label class="modal-label">Vault entry name
+            <input id="unlock-vault-name" type="text" autocomplete="off" />
+          </label>
+          <label class="modal-label">Vault master passphrase
+            <input id="unlock-vault-pass" type="password" autocomplete="off" />
+          </label>
+          <p class="modal-hint">
+            Vault lives at ~/.config/handsneyes/vault.enc (falls back
+            to ~/.config/terminaleyes/vault.enc). Use
+            <code>handsneyes vault add &lt;name&gt;</code> from a
+            terminal to create entries.
+          </p>
+        </div>
+        <div id="unlock-pane-direct" class="unlock-pane hidden">
+          <label class="modal-label">Unlock password
+            <input id="unlock-direct-pass" type="password" autocomplete="off" />
+          </label>
+          <p class="modal-hint">
+            Typed only — never persisted, never written to disk,
+            redacted from /api/runs.
+          </p>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="unlock-modal-cancel" type="button">Cancel</button>
+        <button id="unlock-modal-submit" type="button" class="primary">Unlock</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Execute-Script modal: paste a shell script body and submit -->
   <div id="exec-modal" class="modal hidden" aria-hidden="true">
     <div class="modal-card">

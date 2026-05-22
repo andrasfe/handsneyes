@@ -482,47 +482,145 @@ $btnLock.addEventListener("click", () => {
 // wire except inline with each /api/run.
 let _vaultPassphraseCache = "";
 
-$btnUnlock.addEventListener("click", () => {
-  const vault = ($optVault.value || "").trim();
-  if (!vault) {
-    appendSystemLog("ERROR", "Unlock requires a vault entry name");
-    return;
-  }
-  // If the operator hasn't supplied a passphrase yet this session,
-  // prompt for it. Empty input means "just type the password
-  // directly" — we fall through to a second prompt.
-  if (!_vaultPassphraseCache) {
-    const vp = window.prompt(
-      `Vault passphrase for entry "${vault}"\n` +
-      "(Cancel to type the unlock password directly instead.)",
-    );
-    if (vp === null) {
-      // Operator chose direct-password path.
-      const pw = window.prompt(
-        `Unlock password for "${vault}"\n` +
-        "(Stored only for this run.)",
-      );
-      if (!pw) return;
-      startRun({
-        intent: "unlock the screen",
-        no_focus: true,
-        dry_run: $optDryRun.checked,
-        platform: $optPlatform.value,
-        vault,
-        password: pw,
-      }, "unlock the screen");
+// ── Unlock modal ─────────────────────────────────────────────────
+// Replaces window.prompt() which Firefox + Chrome silently swallow
+// when a previous prompt was Cancel'd, or when the operator has
+// "prevent additional dialogs" set. An inline modal can't be
+// dismissed by the browser engine.
+const $unlockModal = document.getElementById("unlock-modal");
+const $unlockClose = document.getElementById("unlock-modal-close");
+const $unlockCancel = document.getElementById("unlock-modal-cancel");
+const $unlockSubmit = document.getElementById("unlock-modal-submit");
+const $unlockTabVault = document.getElementById("unlock-tab-vault");
+const $unlockTabDirect = document.getElementById("unlock-tab-direct");
+const $unlockPaneVault = document.getElementById("unlock-pane-vault");
+const $unlockPaneDirect = document.getElementById("unlock-pane-direct");
+const $unlockVaultName = document.getElementById("unlock-vault-name");
+const $unlockVaultPass = document.getElementById("unlock-vault-pass");
+const $unlockDirectPass = document.getElementById("unlock-direct-pass");
+
+let _unlockMode = "vault";   // "vault" | "direct"
+
+function _openUnlockModal() {
+  if (!$unlockModal) return;
+  $unlockVaultName.value = ($optVault.value || "").trim() || "desktop";
+  $unlockVaultPass.value = _vaultPassphraseCache || "";
+  $unlockDirectPass.value = "";
+  _setUnlockMode(_unlockMode);
+  $unlockModal.classList.remove("hidden");
+  $unlockModal.setAttribute("aria-hidden", "false");
+  setTimeout(() => {
+    if (_unlockMode === "vault") $unlockVaultPass.focus();
+    else $unlockDirectPass.focus();
+  }, 30);
+}
+
+function _closeUnlockModal() {
+  if (!$unlockModal) return;
+  $unlockModal.classList.add("hidden");
+  $unlockModal.setAttribute("aria-hidden", "true");
+  // Wipe the direct-password input regardless of how we closed;
+  // never leave plaintext in the DOM longer than necessary.
+  if ($unlockDirectPass) $unlockDirectPass.value = "";
+}
+
+function _setUnlockMode(mode) {
+  _unlockMode = mode;
+  $unlockTabVault.classList.toggle("active", mode === "vault");
+  $unlockTabDirect.classList.toggle("active", mode === "direct");
+  $unlockPaneVault.classList.toggle("hidden", mode !== "vault");
+  $unlockPaneDirect.classList.toggle("hidden", mode !== "direct");
+}
+
+if ($unlockTabVault) $unlockTabVault.addEventListener("click", () => _setUnlockMode("vault"));
+if ($unlockTabDirect) $unlockTabDirect.addEventListener("click", () => _setUnlockMode("direct"));
+if ($unlockClose) $unlockClose.addEventListener("click", _closeUnlockModal);
+if ($unlockCancel) $unlockCancel.addEventListener("click", _closeUnlockModal);
+
+function _submitUnlock() {
+  const vault = ($unlockVaultName.value || "").trim();
+  if (_unlockMode === "vault") {
+    const vp = $unlockVaultPass.value;
+    if (!vault) {
+      appendSystemLog("ERROR", "Unlock: vault entry name required");
+      return;
+    }
+    if (!vp) {
+      appendSystemLog("ERROR", "Unlock: vault passphrase required");
       return;
     }
     _vaultPassphraseCache = vp;
+    // Mirror back into the Lock/Unlock row for visibility.
+    if ($optVault) $optVault.value = vault;
+    _closeUnlockModal();
+    startRun({
+      intent: "unlock the screen",
+      no_focus: true,
+      dry_run: $optDryRun.checked,
+      platform: $optPlatform.value,
+      vault,
+      vault_passphrase: _vaultPassphraseCache,
+    }, "unlock the screen");
+  } else {
+    const pw = $unlockDirectPass.value;
+    if (!pw) {
+      appendSystemLog("ERROR", "Unlock: password required");
+      return;
+    }
+    if ($optVault && vault) $optVault.value = vault;
+    _closeUnlockModal();
+    startRun({
+      intent: "unlock the screen",
+      no_focus: true,
+      dry_run: $optDryRun.checked,
+      platform: $optPlatform.value,
+      vault,
+      password: pw,
+    }, "unlock the screen");
   }
-  startRun({
-    intent: "unlock the screen",
-    no_focus: true,
-    dry_run: $optDryRun.checked,
-    platform: $optPlatform.value,
-    vault,
-    vault_passphrase: _vaultPassphraseCache,
-  }, "unlock the screen");
+}
+
+if ($unlockSubmit) $unlockSubmit.addEventListener("click", _submitUnlock);
+
+// Enter submits from either password field; Esc cancels.
+for (const inp of [$unlockVaultPass, $unlockDirectPass, $unlockVaultName]) {
+  if (!inp) continue;
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      _submitUnlock();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      _closeUnlockModal();
+    }
+  });
+}
+
+$btnUnlock.addEventListener("click", () => {
+  if (!$unlockModal) {
+    appendSystemLog(
+      "ERROR",
+      "Unlock modal not found — UI assets out of date?",
+    );
+    return;
+  }
+  // If we already have a cached passphrase this session, skip the
+  // modal and fire straight through. The Lock/Unlock row's vault
+  // field is the source of truth for the entry name.
+  const vault = ($optVault.value || "").trim();
+  if (_vaultPassphraseCache && vault) {
+    startRun({
+      intent: "unlock the screen",
+      no_focus: true,
+      dry_run: $optDryRun.checked,
+      platform: $optPlatform.value,
+      vault,
+      vault_passphrase: _vaultPassphraseCache,
+    }, "unlock the screen");
+    return;
+  }
+  // First Unlock this session — show the modal.
+  _openUnlockModal();
 });
 
 // ── Execute Script modal ──────────────────────────────────────
