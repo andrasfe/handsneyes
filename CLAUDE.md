@@ -172,6 +172,28 @@ Key findings:
 
 Asymptote: oscillation-variance + frame-diff detection on a white cursor is fundamentally ~3-5 steps slower per servo iteration than HSV on the red cursor (more captures needed per measurement). Realistic best-case for this configuration is probably 5-7 steps median; below that needs either the redglass theme back, or a vision model that can locate the cursor in a single frame.
 
+### Host-side data collection (the noise-free path)
+
+The webcam-mediated explorers on the dev mac (`explore_pointer_accel.py`, `explore_pointer_accel_v2.py`) have a ±3-5 px label-noise floor from oscillation-variance cursor detection on Yaru white. That floor has bottlenecked every retrain (see the v5 attempt: 500 active-learning rows on the dev mac took the canary from 9.5 → 10.5 median).
+
+`scripts/host_collect.py` is the way around it. It runs ON THE TARGET MACHINE, injects relative mouse deltas through `/dev/uinput` (so libinput applies the same acceleration curve as the Bluetooth HID path), and reads cursor pixel positions via `xdotool getmouselocation`. Both sides of the (HID, pixel) pair are pixel-exact — no webcam, no detector noise.
+
+Throughput: ~1000-2000 rows/min (vs 30 with the webcam path). A 10-min host session produces more trainable rows than every previous retrain campaign combined.
+
+Deployment (one-off, on the target):
+```
+sudo apt install xdotool python3-evdev
+sudo usermod -aG input $USER   # log out + back in
+scp scripts/host_collect.py <host>:~/
+ssh <host> python3 host_collect.py --samples 5000 --out ~/host_collect.jsonl
+scp <host>:~/host_collect.jsonl \
+    ~/.local/share/handsneyes/runs/host_collect_$(date +%Y%m%d)/homer/host-001/history.jsonl
+```
+
+Then the existing `build_pointer_accel_dataset.py` + `train_pointer_accel.py` work unchanged — the row schema matches.
+
+When pairing the dev-mac Claude with a host-side Claude: the host instance just runs `host_collect.py` (or modifies sampling strategy) and `scp`s the file back. The dev-mac instance handles dataset assembly, training, canary, install. Two-machine handoff, neither has to do the other's job.
+
 ### When to retrain
 
 - **Cursor theme changed.** Critical — the pct-per-hid distribution shifts because detection latency changes. Always use `--since <epoch>` to filter out pre-change history.
