@@ -1685,8 +1685,13 @@ document.addEventListener("focusout", _refreshHostKbCue);
 
 if ($passInput) {
   $passInput.addEventListener("keydown", _passthroughHandleKey);
-  // Block paste/cut/contextmenu autofill — only keystrokes go through.
+  // Paste handling. In live mode: forward to the host as one text
+  // burst (mirrors the live-typing semantics). In compose mode: do
+  // nothing — let the browser paste into the local field. Without
+  // this gate, Cmd+V inside the field always shipped to the host
+  // even when the operator was deliberately composing locally.
   $passInput.addEventListener("paste", (e) => {
+    if (_isComposeMode()) return;  // browser default paste
     e.preventDefault();
     const text = (e.clipboardData || window.clipboardData).getData("text");
     if (!text) return;
@@ -1719,11 +1724,23 @@ function _refreshComposeUI() {
   } catch (_) {}
 }
 if ($passCompose) {
+  // Default-ON. Live (per-keystroke forwarding) is the niche case;
+  // composing locally + committing as a burst is what operators
+  // reach for naturally — and it's the only mode where paste from
+  // the OS clipboard actually pastes locally instead of shipping
+  // straight to the host. Persist any explicit choice in
+  // sessionStorage so the operator can flip to live-mode for an
+  // ssh terminal flow and the page reload doesn't fight them.
   try {
-    if (sessionStorage.getItem("te-passthrough-compose") === "1") {
-      $passCompose.checked = true;
+    const saved = sessionStorage.getItem("te-passthrough-compose");
+    if (saved === null) {
+      $passCompose.checked = true;     // default
+    } else {
+      $passCompose.checked = (saved === "1");
     }
-  } catch (_) {}
+  } catch (_) {
+    $passCompose.checked = true;
+  }
   $passCompose.addEventListener("change", _refreshComposeUI);
   _refreshComposeUI();
 }
