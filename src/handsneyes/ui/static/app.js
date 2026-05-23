@@ -1407,6 +1407,11 @@ function _physicalKeyFromCode(code) {
 
 function _passthroughHandleKey(e) {
   if (!$passInput) return;
+  // Compose mode: the operator is composing/correcting a command
+  // locally before committing it. Bail out completely so the browser
+  // handles typing + arrow keys + backspace natively. The 📤 Send
+  // button then forwards the full field as one text+Enter burst.
+  if (_isComposeMode()) return;
   // Let the browser handle navigation modifier-only events.
   if (e.key === "Shift" || e.key === "Control" || e.key === "Alt"
       || e.key === "Meta") {
@@ -1690,6 +1695,58 @@ if ($passInput) {
       body: { text },
     });
     $passInput.value += text;
+  });
+}
+
+// Compose mode — type/edit locally, commit with 📤 Send. Persists
+// across reloads via sessionStorage so the operator doesn't have to
+// re-toggle on every page open.
+const $passCompose = document.getElementById("passthrough-compose");
+const $btnPassSend = document.getElementById("btn-passthrough-send");
+function _isComposeMode() {
+  return !!($passCompose && $passCompose.checked);
+}
+function _refreshComposeUI() {
+  if (!$passInput) return;
+  const on = _isComposeMode();
+  if ($btnPassSend) $btnPassSend.classList.toggle("hidden", !on);
+  $passInput.placeholder = on
+    ? "Compose locally — click 📤 Send (or Enter) to commit to host"
+    : "Click target field on screenshot first, THEN type here";
+  $passInput.classList.toggle("compose-mode", on);
+  try {
+    sessionStorage.setItem("te-passthrough-compose", on ? "1" : "0");
+  } catch (_) {}
+}
+if ($passCompose) {
+  try {
+    if (sessionStorage.getItem("te-passthrough-compose") === "1") {
+      $passCompose.checked = true;
+    }
+  } catch (_) {}
+  $passCompose.addEventListener("change", _refreshComposeUI);
+  _refreshComposeUI();
+}
+async function _passSendComposed() {
+  if (!$passInput) return;
+  const text = $passInput.value;
+  if (text) {
+    _kbEnqueue({ path: "/api/keyboard/text", body: { text } });
+  }
+  _kbEnqueue({
+    path: "/api/keyboard/key", body: { key: "Enter", modifiers: [] },
+  });
+  $passInput.value = "";
+}
+if ($btnPassSend) $btnPassSend.addEventListener("click", _passSendComposed);
+// In compose mode, Enter inside the field also commits — saves a
+// reach to the 📤 button for terminal-style flows.
+if ($passInput) {
+  $passInput.addEventListener("keydown", (e) => {
+    if (_isComposeMode() && e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      _passSendComposed();
+    }
   });
 }
 

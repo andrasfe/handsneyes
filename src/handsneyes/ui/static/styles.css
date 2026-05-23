@@ -322,6 +322,22 @@ body.col-resizing img { pointer-events: none; }
   opacity: 0.45;
   cursor: not-allowed;
 }
+.frame-keyboard-controls .kb-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.85em;
+  color: var(--fg-dim, #999);
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.frame-keyboard-controls .passthrough.compose-mode {
+  border-color: var(--accent, #6da3ff);
+  background: rgba(109, 163, 255, 0.05);
+}
 
 #paste-modal .modal-card {
   width: min(560px, 96vw);

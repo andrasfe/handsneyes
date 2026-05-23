@@ -85,6 +85,13 @@
                 title="Pick a local text file, paste its contents into a terminal on the host">📄 file</button>
         <input id="paste-file-picker" type="file" hidden
                accept=".txt,.md,.json,.yaml,.yml,.sh,.py,.js,.ts,.css,.html,.xml,.conf,.cfg,.ini,.toml,.log,.csv,.tsv,text/*" />
+        <label class="kb-toggle"
+               title="Compose mode: typing edits the local field only. Click 📤 Send to forward the full text + Enter to the host. Useful for commands you want to compose/correct locally before committing.">
+          <input id="passthrough-compose" type="checkbox" />
+          compose
+        </label>
+        <button id="btn-passthrough-send" type="button" class="kb-btn hidden"
+                title="Send the field contents + Enter to the host (compose mode only)">📤 Send</button>
       </div>
       <div class="frame-quick-actions">
         <button id="btn-lock" type="button" class="quick"
