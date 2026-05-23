@@ -68,6 +68,34 @@ async def _key_combo_runner(
     )
 
 
+async def _open_app_runner(
+    ctx: AgentContext, *, app: str, settle_ms: int = 1500,
+) -> Outcome:
+    """Resolve the alias via the platform adapter and open the app."""
+    if ctx.keyboard is None:
+        return Outcome(success=False, reason="no keyboard in context")
+    if ctx.platform is None:
+        return Outcome(
+            success=False,
+            reason="no platform adapter in context; cannot open app",
+        )
+    hint = ctx.platform.canonicalise_app(app)
+    try:
+        await ctx.platform.open_app(
+            ctx.keyboard, app=hint, settle_ms=settle_ms,
+        )
+    except Exception as e:  # noqa: BLE001
+        return Outcome(
+            success=False,
+            reason=f"open_app({hint.canonical!r}) failed: {e}",
+        )
+    return Outcome(
+        success=True,
+        reason=f"opened {hint.canonical!r}",
+        data={"alias": app, "canonical": hint.canonical},
+    )
+
+
 _AGENT_CLASSES: dict[str, type[Agent]] = {
     "wake":     WakeAgent,
     "type":     TypeAgent,
@@ -143,6 +171,8 @@ class PlanExecutor:
     async def _run_step(self, step: PlanStep) -> Outcome:
         if step.agent == "key_combo":
             return await _key_combo_runner(self.ctx, **step.kwargs)
+        if step.agent == "open_app":
+            return await _open_app_runner(self.ctx, **step.kwargs)
         cls = _AGENT_CLASSES.get(step.agent)
         if cls is None:
             return Outcome(

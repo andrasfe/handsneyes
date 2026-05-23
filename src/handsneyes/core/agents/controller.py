@@ -131,6 +131,49 @@ def plan_intent(intent: str) -> list[PlanStep]:
             ),
         ]
 
+    # ── cd / go-to-path (shell path, not a URL) ────────────────────
+    # "cd ~/foo", "go to ~/foo", "navigate to /var/log" → TypeAgent
+    # emitting `cd <path>` + Enter. URL nav above already claimed the
+    # dotted-domain shape, so what's left here are unix paths.
+    path_m = re.match(
+        r"^\s*(?:cd|go\s+to|navigate\s+to)\s+(~?(?:/\S*)?|~|/\S+)\s*$",
+        intent,
+        re.IGNORECASE,
+    )
+    if path_m:
+        path = path_m.group(1).strip().rstrip(".,;:")
+        if path:
+            return [
+                PlanStep(
+                    agent="type",
+                    kwargs={"text": f"cd {path}", "submit": True},
+                    rationale=f"cd-path match → {path!r}",
+                ),
+            ]
+
+    # ── open <app> [and <rest>] ────────────────────────────────────
+    # Catches "open a terminal", "open the calculator", and the
+    # chained form "open a terminal and go to ~/foo" where the tail
+    # is re-planned recursively (here that yields a `cd <path>` type
+    # step). Runs AFTER url-nav, so "open reddit.com" still routes
+    # to navigate.
+    open_m = re.match(r"^\s*open\s+(.+?)\s*$", intent, re.IGNORECASE)
+    if open_m:
+        rest = open_m.group(1).strip()
+        head, _, tail = rest.partition(" and ")
+        app_name = head.strip().rstrip(".,;:")
+        if app_name:
+            steps: list[PlanStep] = [
+                PlanStep(
+                    agent="open_app",
+                    kwargs={"app": app_name},
+                    rationale=f"open-keyword match → {app_name!r}",
+                ),
+            ]
+            if tail.strip():
+                steps.extend(plan_intent(tail.strip()))
+            return steps
+
     # ── click (find-target-and-click) ─────────────────────────────
     # "click <target>" → ClickAgent target= remainder.
     click_m = re.match(r"^\s*click\s+(?:on\s+)?(.+)$", intent, re.IGNORECASE)

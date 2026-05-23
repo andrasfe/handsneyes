@@ -93,6 +93,46 @@ class TestPlanExecutor:
         assert sentinel_called == []
 
     @pytest.mark.asyncio
+    async def test_open_app_step_uses_platform_adapter(self) -> None:
+        from unittest.mock import MagicMock
+
+        from handsneyes.platforms.base import AppHint
+
+        kb = AsyncMock()
+        platform = MagicMock()
+        platform.canonicalise_app = MagicMock(
+            return_value=AppHint(
+                canonical="terminal", expect_substrings=("terminal",),
+            )
+        )
+        platform.open_app = AsyncMock()
+        ex = PlanExecutor(AgentContext(keyboard=kb, platform=platform))
+        results = await ex.run([
+            PlanStep(
+                agent="open_app",
+                kwargs={"app": "a terminal"},
+                rationale="open-keyword match",
+            ),
+        ])
+        assert len(results) == 1
+        assert results[0].outcome.success
+        platform.canonicalise_app.assert_called_once_with("a terminal")
+        platform.open_app.assert_awaited_once()
+        assert results[0].outcome.data["canonical"] == "terminal"
+
+    @pytest.mark.asyncio
+    async def test_open_app_step_needs_keyboard(self) -> None:
+        from unittest.mock import MagicMock
+
+        platform = MagicMock()
+        ex = PlanExecutor(AgentContext(platform=platform))
+        results = await ex.run([
+            PlanStep(agent="open_app", kwargs={"app": "terminal"}, rationale=""),
+        ])
+        assert not results[0].outcome.success
+        assert "no keyboard" in results[0].outcome.reason
+
+    @pytest.mark.asyncio
     async def test_continue_on_failure_flag(self) -> None:
         kb = AsyncMock()
         ex = PlanExecutor(AgentContext(keyboard=kb))
