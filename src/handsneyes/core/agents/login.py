@@ -52,6 +52,19 @@ LOGIN_QUESTION = (
 )
 
 
+ALREADY_UNLOCKED_QUESTION = (
+    "Look at the screen. Is this a normal UNLOCKED desktop or application "
+    "interface — i.e. the user is already logged in and past any lock/login "
+    "screen?\n\n"
+    "Return TRUE for: a regular desktop with a taskbar/dock, an open "
+    "application window (settings, browser, terminal, file manager, editor, "
+    "etc.), a populated home screen.\n\n"
+    "Return FALSE for: a lock screen, a login/password prompt, a screensaver, "
+    "a black/asleep screen, a boot screen, or anything that obscures the "
+    "logged-in session."
+)
+
+
 @dataclass
 class LoginOutcome(Outcome):
     pass
@@ -159,6 +172,26 @@ class LoginAgent(Agent):
                 attempts=verify_attempts, interval=verify_interval,
             )
             if not ok:
+                # Polling never saw a login screen. Before failing, check
+                # whether the target is already unlocked — if so, the unlock
+                # task is a no-op success.
+                already_unlocked = await VerifyAgent(self.ctx).run(
+                    question=ALREADY_UNLOCKED_QUESTION, visual_only=True,
+                )
+                if already_unlocked:
+                    logger.info(
+                        "LoginAgent: target already unlocked — skipping "
+                        "password entry (%s)", already_unlocked.reason,
+                    )
+                    return LoginOutcome(
+                        success=True,
+                        reason="already unlocked — no password sent",
+                        data={
+                            "verified": True,
+                            "already_unlocked": True,
+                            "submit": False,
+                        },
+                    )
                 return LoginOutcome(
                     success=False,
                     reason=(

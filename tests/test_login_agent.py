@@ -178,6 +178,46 @@ class TestLoginAgent:
         kb.send_keystroke.assert_any_await("Enter")
 
     @pytest.mark.asyncio
+    async def test_already_unlocked_succeeds_without_typing(self) -> None:
+        # Vision client answers False to "is this a login screen?" for every
+        # poll, then True to "is this already an unlocked desktop?" — so we
+        # should short-circuit to success without typing.
+        client = MagicMock()
+        client.chat = MagicMock()
+        client.chat.completions = MagicMock()
+        # First N calls are the login-poll (False). The next call is the
+        # already-unlocked probe (True).
+        responses = [
+            _verify_response(answer=False, reason="settings interface"),
+            _verify_response(answer=False, reason="settings interface"),
+            _verify_response(answer=True, reason="settings window in foreground"),
+        ]
+        client.chat.completions.create = AsyncMock(side_effect=responses)
+        kb = AsyncMock()
+        m = AsyncMock()
+        cap = AsyncMock()
+        cap.capture_frame = AsyncMock(
+            return_value=MagicMock(image=_blank_image())
+        )
+        ctx = AgentContext(
+            vision_client=client,
+            vision_model="m",
+            keyboard=kb,
+            mouse=m,
+            capture=cap,
+        )
+        out = await LoginAgent(ctx).run(
+            password="hunter2",
+            wake=False,
+            verify_attempts=2,
+            verify_interval=0.0,
+        )
+        assert out
+        assert out.data.get("already_unlocked") is True
+        kb.send_text.assert_not_called()
+        kb.send_keystroke.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_skip_verify_types_immediately(self) -> None:
         kb = AsyncMock()
         ctx = AgentContext(keyboard=kb)
