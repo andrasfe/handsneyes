@@ -15,6 +15,17 @@ from handsneyes.io.mouse.base import MouseOutput, MouseOutputError
 logger = logging.getLogger(__name__)
 
 
+def _extract_detail(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+        if isinstance(body, dict) and "detail" in body:
+            return str(body["detail"])
+    except Exception:
+        pass
+    text = response.text.strip()
+    return text or response.reason_phrase or "no response body"
+
+
 class HttpMouseOutput(MouseOutput):
     """Sends mouse actions to the Pi HTTP REST API.
 
@@ -49,11 +60,24 @@ class HttpMouseOutput(MouseOutput):
         try:
             resp = await self._client.get("/health")
             resp.raise_for_status()
+            if self._transport == "bt":
+                health = resp.json()
+                if not health.get("bt_hid_connected", False):
+                    raise MouseOutputError(
+                        f"Pi at {self._base_url} reports bt_hid_connected=false — "
+                        "no Bluetooth client paired to the Pi. Re-pair from the "
+                        "target device, or restart bluetoothd on the Pi.",
+                        backend="http",
+                    )
             logger.info(
                 "Mouse connected to %s (transport=%s)",
                 self._base_url,
                 self._transport,
             )
+        except MouseOutputError:
+            await self._client.aclose()
+            self._client = None
+            raise
         except Exception as e:
             await self._client.aclose()
             self._client = None
@@ -90,6 +114,12 @@ class HttpMouseOutput(MouseOutput):
             resp = await self._client.post(path, json=payload)
             resp.raise_for_status()
             return resp
+        except httpx.HTTPStatusError as e:
+            detail = _extract_detail(e.response)
+            raise MouseOutputError(
+                f"HTTP {e.response.status_code} from {path}: {detail}",
+                backend="http",
+            ) from e
         except httpx.HTTPError as e:
             raise MouseOutputError(
                 f"HTTP request to {path} failed: {e}", backend="http"

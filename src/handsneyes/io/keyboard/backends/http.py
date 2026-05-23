@@ -14,6 +14,17 @@ from handsneyes.io.keyboard.base import KeyboardOutput, KeyboardOutputError
 logger = logging.getLogger(__name__)
 
 
+def _extract_detail(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+        if isinstance(body, dict) and "detail" in body:
+            return str(body["detail"])
+    except Exception:
+        pass
+    text = response.text.strip()
+    return text or response.reason_phrase or "no response body"
+
+
 class HttpKeyboardOutput(KeyboardOutput):
     """Sends keyboard actions to the local HTTP command endpoint."""
 
@@ -38,7 +49,20 @@ class HttpKeyboardOutput(KeyboardOutput):
         try:
             resp = await self._client.get("/health")
             resp.raise_for_status()
+            if self._transport == "bt":
+                health = resp.json()
+                if not health.get("bt_hid_connected", False):
+                    raise KeyboardOutputError(
+                        f"Pi at {self._base_url} reports bt_hid_connected=false — "
+                        "no Bluetooth client paired to the Pi. Re-pair from the "
+                        "target device, or restart bluetoothd on the Pi.",
+                        backend="http",
+                    )
             logger.info("Connected to endpoint at %s", self._base_url)
+        except KeyboardOutputError:
+            await self._client.aclose()
+            self._client = None
+            raise
         except Exception as e:
             await self._client.aclose()
             self._client = None
@@ -103,6 +127,12 @@ class HttpKeyboardOutput(KeyboardOutput):
             resp = await self._client.post(path, json=payload)
             resp.raise_for_status()
             return resp
+        except httpx.HTTPStatusError as e:
+            detail = _extract_detail(e.response)
+            raise KeyboardOutputError(
+                f"HTTP {e.response.status_code} from {path}: {detail}",
+                backend="http",
+            ) from e
         except httpx.HTTPError as e:
             raise KeyboardOutputError(
                 f"HTTP request to {path} failed: {e}", backend="http"
