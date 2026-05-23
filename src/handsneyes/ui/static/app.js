@@ -1389,6 +1389,22 @@ if ($passWarnDismiss) {
   });
 }
 
+function _physicalKeyFromCode(code) {
+  if (!code) return null;
+  let m = /^Key([A-Z])$/.exec(code);
+  if (m) return m[1].toLowerCase();
+  m = /^Digit(\d)$/.exec(code);
+  if (m) return m[1];
+  m = /^Numpad(\d)$/.exec(code);
+  if (m) return m[1];
+  const punct = {
+    Minus: "-", Equal: "=", BracketLeft: "[", BracketRight: "]",
+    Backslash: "\\", Semicolon: ";", Quote: "'", Comma: ",",
+    Period: ".", Slash: "/", Backquote: "`",
+  };
+  return punct[code] || null;
+}
+
 function _passthroughHandleKey(e) {
   if (!$passInput) return;
   // Let the browser handle navigation modifier-only events.
@@ -1460,9 +1476,16 @@ function _passthroughHandleKey(e) {
     // If modifier present (other than shift), send as combo.
     const nonShiftMods = mods.filter(m => m !== "shift");
     if (nonShiftMods.length > 0) {
+      // macOS composes Option-letter into glyphs like Alt+T → "†",
+      // Alt+E → "´", etc. e.code is the physical key ("KeyT",
+      // "Digit1", …) and bypasses the composition layer, so prefer
+      // it for combos. Fall back to e.key.toLowerCase() if e.code
+      // isn't a recognisable shape (function keys, etc. already
+      // handled via _PASS_SPECIAL above).
+      const comboKey = _physicalKeyFromCode(e.code) || e.key.toLowerCase();
       _kbEnqueue({
         path: "/api/keyboard/key",
-        body: { key: e.key.toLowerCase(), modifiers: mods },
+        body: { key: comboKey, modifiers: mods },
       });
       // Local mirror of shortcut-letter chords would mislead more
       // than it helps (Ctrl-A locally selects, but on the host it
