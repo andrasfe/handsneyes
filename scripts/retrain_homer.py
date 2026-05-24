@@ -241,6 +241,18 @@ def main() -> int:
              "useful with a redglass-style cursor; on Yaru white this "
              "would empty the corpus.",
     )
+    ap.add_argument(
+        "--from-scratch", action="store_true",
+        help="Train from random init instead of warm-starting from the "
+             "currently-shipped checkpoint. Use when changing model "
+             "architecture or rebuilding the corpus from a clean slate.",
+    )
+    ap.add_argument(
+        "--include-explore-v2", action="store_true",
+        help="Re-include the explore_v2_* active-learning sessions in "
+             "the training corpus. Off by default — those rows produced "
+             "the v5/v6 retrain regressions in real use.",
+    )
     args = ap.parse_args()
 
     cwd = Path.cwd()
@@ -249,13 +261,33 @@ def main() -> int:
     summary: dict = {"results": []}
 
     if args.only in ("pointer_accel", "both"):
+        # Exclude the explore_v2_* active-learning sessions by default:
+        # they produced the v5/v6 corpora that regressed in real use.
+        # Pass --include-explore-v2 to override.
         build_cmd = [py, "scripts/build_pointer_accel_dataset.py"]
         if args.hsv_only:
             build_cmd.append("--hsv-only")
+        if not args.include_explore_v2:
+            build_cmd.extend(["--exclude-pattern", "explore_v2*"])
+        # Warm-start from the currently-shipped checkpoint by default
+        # so the retrain fine-tunes the proven model on new data, not
+        # trains a fresh one from random init. Pass --from-scratch
+        # to override (e.g. when changing architecture).
+        train_cmd_prefix = [py, "scripts/train_pointer_accel.py"]
+        shipped = Path(
+            "src/handsneyes/platforms/linux_gnome/models/pointer_accel"
+        )
+        if not args.from_scratch and shipped.exists():
+            train_cmd_prefix.extend([
+                "--init-from", str(shipped),
+                # Lower LR for fine-tuning; the default 1e-2 would erase
+                # the warm-start in the first batch.
+                "--lr", "5e-4",
+            ])
         verdict = _retrain_one(
             family="pointer_accel",
             build_cmd=build_cmd,
-            train_cmd_prefix=[py, "scripts/train_pointer_accel.py"],
+            train_cmd_prefix=train_cmd_prefix,
             eval_fn=_eval_pointer_accel,
             canary_path=args.canary_dir / "pointer_accel.jsonl",
             checkpoints_root=args.checkpoints_root,

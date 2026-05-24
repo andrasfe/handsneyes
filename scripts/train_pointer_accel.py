@@ -125,6 +125,15 @@ def main() -> int:
     ap.add_argument(
         "--no-augment", dest="augment", action="store_false",
     )
+    ap.add_argument(
+        "--init-from", type=Path, default=None,
+        help="Warm-start from an existing checkpoint dir. Loads its "
+             "weights.npz as the initial state, then continues training "
+             "on the current dataset. Use --lr ~5e-4 (10x lower than "
+             "from-scratch) when warm-starting. Useful for fine-tuning "
+             "a known-good model on small batches of new data instead "
+             "of retraining from random init.",
+    )
     args = ap.parse_args()
 
     try:
@@ -175,6 +184,37 @@ def main() -> int:
             return self.fc3(x)
 
     model = _MLP(args.hidden)
+
+    if args.init_from is not None:
+        init_npz = args.init_from / "weights.npz"
+        init_cfg = args.init_from / "config.json"
+        if not init_npz.exists():
+            print(f"--init-from: weights.npz missing at {init_npz}",
+                  file=sys.stderr)
+            return 2
+        # Verify the hidden size matches; warm-starting a different
+        # shape would silently broadcast or fail mid-train.
+        try:
+            cfg = json.loads(init_cfg.read_text("utf-8"))
+            init_hidden = int(cfg.get("hidden", -1))
+            if init_hidden != args.hidden:
+                print(
+                    f"--init-from hidden={init_hidden} != --hidden "
+                    f"{args.hidden}; refusing to load mismatched shape.",
+                    file=sys.stderr,
+                )
+                return 2
+        except Exception:
+            pass  # no config — best-effort load
+        w = np.load(init_npz)
+        model.fc1.weight = mx.array(w["fc1.weight"].astype(np.float32))
+        model.fc1.bias = mx.array(w["fc1.bias"].astype(np.float32))
+        model.fc2.weight = mx.array(w["fc2.weight"].astype(np.float32))
+        model.fc2.bias = mx.array(w["fc2.bias"].astype(np.float32))
+        model.fc3.weight = mx.array(w["fc3.weight"].astype(np.float32))
+        model.fc3.bias = mx.array(w["fc3.bias"].astype(np.float32))
+        mx.eval(model.parameters())
+        print(f"warm-started from {args.init_from}")
 
     def loss_fn(model, x, y):
         pred = model(x)
