@@ -1083,15 +1083,6 @@ class VisualServoHomer:
         # pixel and expects the cursor to land *there*, not 20px off.
         # Cursor-detection precision (~5–8 px on a 1080p webcam) is
         # the real floor; we set the gate just above that.
-        #
-        # confirm_frames=3 requires three consecutive in-tolerance
-        # readings before clicking. With per-reading detector noise
-        # σ≈5 px, a single in-tolerance reading at ~4 px gate fires
-        # ~25% of the time by luck; three in a row drops the
-        # false-confirm rate to ~1%. Costs ~6s in extra detections
-        # per click, buys you precision that lands on small buttons
-        # instead of next to them.
-        #
         # In no-slam mode (chained clicks within an open UI) we
         # also constrain the closed loop to axis-aligned moves so
         # diagonal transit doesn't open sibling menus.
@@ -1100,8 +1091,8 @@ class VisualServoHomer:
             cursor_img=cursor_img, button=button, run_dir=run_dir,
             history=history, target_desc="<manual>",
             verify_navigation=False, last_proof=None,
-            confirm_frames=3,
-            click_tol_pct=0.004,
+            confirm_frames=1,
+            click_tol_pct=0.006,
             click=click,
             axis_aligned=(prev_cursor_pct is not None),
         )
