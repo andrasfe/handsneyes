@@ -165,10 +165,24 @@ def _retrain_one(
             shutil.rmtree(new_dir, ignore_errors=True)
         return result
     print(f"\n=== retrain {family}: canary eval ===")
+    if not canary_path.exists():
+        # No canary file → no gating. The cc's tune flow uses
+        # Live/Previous slot rotation + manual Rollback as the safety
+        # net instead of a canary regression check, so leaving the
+        # candidate in place (not deleted) is what the install step
+        # downstream expects.
+        print(f"  no canary at {canary_path} — accepting without eval")
+        result["status"] = "accepted"
+        result["new"] = {"checkpoint": new_dir.name}
+        result["note"] = "no_canary_auto_accept"
+        return result
     new_metrics = eval_fn(new_dir, canary_path)
     if new_metrics is None:
+        # Canary file exists but eval still failed (corrupted file,
+        # missing fields, etc.). This is a real problem — keep the
+        # candidate dir so an operator can inspect it but mark the
+        # status so the cc's install step skips it.
         result["status"] = "eval_failed"
-        shutil.rmtree(new_dir, ignore_errors=True)
         return result
     result["new"] = {"checkpoint": new_dir.name, **new_metrics}
     prev = None
