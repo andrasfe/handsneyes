@@ -362,6 +362,24 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {"status": "ok", "button": request.button}
 
+    @app.post("/bt/mouse/press")
+    async def bt_mouse_press(request: MouseClickRequest) -> dict[str, str]:
+        bt = _get_bt()
+        try:
+            await bt.press(request.button)
+        except (ValueError, Exception) as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return {"status": "ok", "button": request.button, "state": "pressed"}
+
+    @app.post("/bt/mouse/release")
+    async def bt_mouse_release(request: MouseClickRequest) -> dict[str, str]:
+        bt = _get_bt()
+        try:
+            await bt.release(request.button)
+        except (ValueError, Exception) as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return {"status": "ok", "button": request.button, "state": "released"}
+
     @app.post("/bt/mouse/scroll")
     async def bt_mouse_scroll(request: MouseScrollRequest) -> dict[str, str]:
         bt = _get_bt()

@@ -1040,7 +1040,81 @@ async function _fireHomingClick(x_pct, y_pct, clientX, clientY) {
   setTimeout(() => syncTextFromHost({ silent: true }), 250);
 }
 
+// Drag-and-drop state. mousedown captures the start position; mousemove
+// elevates to "dragging" once the cursor moves more than DRAG_THRESHOLD_PX
+// in screen pixels. mouseup either fires /api/mouse/drag (if dragging)
+// or falls through to the click handler (if not). The click handler
+// checks _suppressNextClick so we don't double-fire on a drag-then-release.
+const DRAG_THRESHOLD_PX = 8;
+let _mouseDownPos = null;        // {x_pct, y_pct, clientX, clientY}
+let _isDragging = false;
+let _suppressNextClick = false;
+
+$frame.addEventListener("mousedown", (e) => {
+  if (!$optClickToMove || !$optClickToMove.checked) return;
+  if ($frame.classList.contains("empty")) return;
+  if (e.button !== 0) return;  // only track left-button drags
+  const rect = imageRect();
+  if (!rect) return;
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  if (x < 0 || y < 0 || x > rect.width || y > rect.height) return;
+  _mouseDownPos = {
+    x_pct: Math.max(0, Math.min(1, x / rect.width)),
+    y_pct: Math.max(0, Math.min(1, y / rect.height)),
+    clientX: e.clientX, clientY: e.clientY,
+  };
+  _isDragging = false;
+});
+
+$frame.addEventListener("mousemove", (e) => {
+  if (!_mouseDownPos) return;
+  const dx = e.clientX - _mouseDownPos.clientX;
+  const dy = e.clientY - _mouseDownPos.clientY;
+  if (Math.hypot(dx, dy) > DRAG_THRESHOLD_PX) {
+    _isDragging = true;
+  }
+});
+
+$frame.addEventListener("mouseup", async (e) => {
+  if (!_mouseDownPos) return;
+  if (!_isDragging) { _mouseDownPos = null; return; }
+  // It's a drag. Compute the destination, fire /api/mouse/drag,
+  // and suppress the click event that will follow this mouseup.
+  const start = _mouseDownPos;
+  _mouseDownPos = null;
+  _isDragging = false;
+  _suppressNextClick = true;
+  // Also cancel any pending single-click debounce so the click handler
+  // can't sneak in a click_at on top of our drag.
+  if (_pendingSingleClickTimer != null) {
+    clearTimeout(_pendingSingleClickTimer);
+    _pendingSingleClickTimer = null;
+  }
+  const rect = imageRect();
+  if (!rect) return;
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  const to_x_pct = Math.max(0, Math.min(1, x / rect.width));
+  const to_y_pct = Math.max(0, Math.min(1, y / rect.height));
+  showClickMarker(e.clientX, e.clientY);
+  appendSystemLog(
+    "INFO",
+    `mouse drag (${start.x_pct.toFixed(3)},${start.y_pct.toFixed(3)}) → ` +
+    `(${to_x_pct.toFixed(3)},${to_y_pct.toFixed(3)})`,
+  );
+  await postMouse(
+    "/api/mouse/drag",
+    {
+      from_x_pct: start.x_pct, from_y_pct: start.y_pct,
+      to_x_pct, to_y_pct, button: "left",
+    },
+    "dragging…",
+  );
+});
+
 $frame.addEventListener("click", (e) => {
+  if (_suppressNextClick) { _suppressNextClick = false; return; }
   if (!$optClickToMove || !$optClickToMove.checked) return;
   if ($frame.classList.contains("empty")) return;
   const rect = imageRect();

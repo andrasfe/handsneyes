@@ -1097,6 +1097,52 @@ class VisualServoHomer:
             axis_aligned=(prev_cursor_pct is not None),
         )
 
+    async def drag_to_pixels(
+        self,
+        from_x_pct: float, from_y_pct: float,
+        to_x_pct: float,   to_y_pct: float,
+        button: str = "left",
+    ) -> ClickOutcome:
+        """Press at (from_x_pct, from_y_pct), drag to (to_x_pct, to_y_pct),
+        release.
+
+        Composes two ``home_to_pixel(click=False)`` calls with a
+        button-press in between. The second home runs in "no-slam"
+        mode — it MUST NOT re-slam the cursor to a corner because that
+        would translate to a drag across the whole screen with the
+        button held, which is destructive in most apps.
+
+        Returns the ClickOutcome from the second home so callers see
+        whether the drop landed on target.
+        """
+        # 1. Home to the source pixel (no click — just position).
+        out1 = await self.home_to_pixel(
+            from_x_pct, from_y_pct, button=button,
+            hotspot_offset=True, click=False,
+        )
+        if not out1.clicked:
+            return out1  # homing failed; nothing to drag
+        # 2. Press at the source.
+        await self._session._executor._mouse.press(button)
+        # 3. Home to the destination with no-slam (prev_cursor_pct
+        #    tells home_to_pixel we already know roughly where the
+        #    cursor is, so it skips the corner-slam that would
+        #    otherwise release-on-no-target across the whole screen).
+        try:
+            out2 = await self.home_to_pixel(
+                to_x_pct, to_y_pct, button=button,
+                hotspot_offset=True, click=False,
+                prev_cursor_pct=(from_x_pct, from_y_pct),
+            )
+        finally:
+            # 4. Always release — leaving the button stuck down is
+            #    a worse outcome than an inaccurate drop.
+            try:
+                await self._session._executor._mouse.release(button)
+            except Exception:
+                logger.exception("drag release failed")
+        return out2
+
     async def _fire_longjump(
         self, *,
         cursor_img: tuple[float, float],

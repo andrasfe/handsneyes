@@ -101,6 +101,16 @@ class HttpMouseOutput(MouseOutput):
         await self._post(f"{self._prefix}/click", {"button": button})
         logger.debug("Mouse click: %s", button)
 
+    async def press(self, button: str = "left") -> None:
+        """Hold a button down — paired with release() for drag flows."""
+        await self._post(f"{self._prefix}/press", {"button": button})
+        logger.debug("Mouse press: %s", button)
+
+    async def release(self, button: str = "left") -> None:
+        """Release a previously-pressed button."""
+        await self._post(f"{self._prefix}/release", {"button": button})
+        logger.debug("Mouse release: %s", button)
+
     async def scroll(self, amount: int) -> None:
         """Send a scroll wheel action."""
         await self._post(f"{self._prefix}/scroll", {"amount": amount})

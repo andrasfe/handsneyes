@@ -68,6 +68,22 @@ class MouseOutput(ABC):
         """
         ...
 
+    async def press(self, button: str = "left") -> None:
+        """Hold a mouse button down (no release). Used by drag flows.
+
+        Default implementation raises NotImplementedError; backends
+        that support drag (HttpMouseOutput via Pi BT HID) override it.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support press()"
+        )
+
+    async def release(self, button: str = "left") -> None:
+        """Release a previously-pressed mouse button. See ``press``."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support release()"
+        )
+
     @abstractmethod
     async def scroll(self, amount: int) -> None:
         """Send a scroll wheel action.

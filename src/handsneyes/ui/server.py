@@ -74,6 +74,14 @@ class MouseClickAtRequest(BaseModel):
     x_pct: float = Field(ge=0.0, le=1.0)
     y_pct: float = Field(ge=0.0, le=1.0)
     button: str = Field(default="left", pattern="^(left|right|middle)$")
+
+
+class MouseDragRequest(BaseModel):
+    from_x_pct: float = Field(ge=0.0, le=1.0)
+    from_y_pct: float = Field(ge=0.0, le=1.0)
+    to_x_pct: float = Field(ge=0.0, le=1.0)
+    to_y_pct: float = Field(ge=0.0, le=1.0)
+    button: str = Field(default="left", pattern="^(left|right|middle)$")
     # ``count=2`` → home to the pixel and fire a double-click. The
     # homer always fires one click as part of landing; for count > 1
     # we send (count - 1) extra in-place clicks after the home is
@@ -792,6 +800,72 @@ def create_app(
 
     def _schedule_snapshot(label: str) -> None:
         asyncio.create_task(_snapshot_after_manual_action(label))
+
+    @app.post("/api/mouse/drag")
+    async def mouse_drag(req: MouseDragRequest) -> JSONResponse:
+        """Drag-and-drop: home to (from), press button, home to (to),
+        release. Same single-host-mouse exclusivity as click_at."""
+        if runner.is_busy():
+            raise HTTPException(409, "a run is currently in progress")
+        from handsneyes.core.vision.session_adapter import SessionAdapter as _SessionAdapter
+        from handsneyes.core.vision.visual_servo_homer import (
+            VisualServoHomer,
+        )
+
+        async with _manual_mouse_lock:
+            ctx = keyboard = mouse = capture = None
+            try:
+                ctx, keyboard, mouse, capture = await context_factory()
+            except Exception as e:
+                if capture is not None:
+                    try: await capture.close()
+                    except Exception: pass
+                if keyboard is not None:
+                    try: await keyboard.disconnect()
+                    except Exception: pass
+                if mouse is not None:
+                    try: await mouse.disconnect()
+                    except Exception: pass
+                raise HTTPException(502, f"context_factory failed: {e}")
+            try:
+                adapter = _SessionAdapter(ctx)
+                homer = VisualServoHomer(session=adapter)
+                outcome = await homer.drag_to_pixels(
+                    req.from_x_pct, req.from_y_pct,
+                    req.to_x_pct, req.to_y_pct,
+                    button=req.button,
+                )
+                import time as _time
+                # A successful drag leaves the cursor near (to_x, to_y),
+                # so update the no-slam cache to that point.
+                if bool(outcome.clicked):
+                    app.state.last_click_xy_at = (
+                        (req.to_x_pct, req.to_y_pct), _time.time(),
+                    )
+                    app.state.last_scroll_home_xy = (
+                        req.to_x_pct, req.to_y_pct,
+                    )
+                return JSONResponse({
+                    "ok": bool(outcome.clicked),
+                    "reason": outcome.reason,
+                    "steps": outcome.steps,
+                    "from": [req.from_x_pct, req.from_y_pct],
+                    "to":   [req.to_x_pct, req.to_y_pct],
+                    "button": req.button,
+                })
+            except Exception as e:
+                logger.exception("drag_to_pixels failed")
+                raise HTTPException(502, f"drag_to_pixels failed: {e}")
+            finally:
+                if capture is not None:
+                    try: await capture.close()
+                    except Exception: pass
+                if keyboard is not None:
+                    try: await keyboard.disconnect()
+                    except Exception: pass
+                if mouse is not None:
+                    try: await mouse.disconnect()
+                    except Exception: pass
 
     @app.post("/api/mouse/click_at")
     async def mouse_click_at(req: MouseClickAtRequest) -> JSONResponse:

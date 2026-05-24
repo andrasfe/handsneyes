@@ -610,15 +610,32 @@ class BluetoothHidServer:
 
     async def click(self, button: str = "left") -> None:
         """Click a mouse button (press and release)."""
+        await self.press(button)
+        await asyncio.sleep(0.05)
+        await self.release(button)
+        logger.debug("BT mouse click: %s", button)
+
+    async def press(self, button: str = "left") -> None:
+        """Hold a mouse button down. Stays pressed until release(); used
+        by drag-and-drop where moves between press/release become drag
+        deltas instead of cursor-only motion."""
         btn = BUTTON_MAP.get(button.lower())
         if btn is None:
             raise ValueError(f"Unknown button: {button!r}. Use: left, right, middle")
         self._mouse_buttons |= btn
         await self._send_mouse_report(self._mouse_buttons, 0, 0, 0)
-        await asyncio.sleep(0.05)
+        logger.debug("BT mouse press: %s", button)
+
+    async def release(self, button: str = "left") -> None:
+        """Release a previously-pressed mouse button. Idempotent —
+        releasing an already-released button just resends the current
+        button state (cheap no-op)."""
+        btn = BUTTON_MAP.get(button.lower())
+        if btn is None:
+            raise ValueError(f"Unknown button: {button!r}. Use: left, right, middle")
         self._mouse_buttons &= ~btn
         await self._send_mouse_report(self._mouse_buttons, 0, 0, 0)
-        logger.debug("BT mouse click: %s", button)
+        logger.debug("BT mouse release: %s", button)
 
     async def scroll(self, amount: int) -> None:
         """Scroll the mouse wheel. Positive=up, negative=down."""
