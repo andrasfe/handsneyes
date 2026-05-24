@@ -2023,27 +2023,132 @@ def create_app(
         })
 
     # ── homer retrain (online training) ──────────────────────────
+    # ── homer slot management ────────────────────────────────────
+    # Three slots:
+    #   Live      — what the homer loads at runtime (committed to git)
+    #   Previous  — one-deep rollback target (outside git, in user data)
+    #   Candidate — newly trained, lives in data/ml/checkpoints/pointer_accel-vN
+    #
+    # Tune: train candidate -> rotate (live -> previous, candidate -> live).
+    # Rollback: swap live <-> previous (so a second rollback puts it back).
+    from pathlib import Path as _PathHomer
+    _HOMER_LIVE = _PathHomer(
+        "src/handsneyes/platforms/linux_gnome/models/pointer_accel"
+    )
+    _HOMER_PREV = _PathHomer.home() / (
+        ".local/share/handsneyes/model_slots/previous/pointer_accel"
+    )
+    _HOMER_LAST_TUNE_TS = _PathHomer.home() / (
+        ".config/handsneyes/last_tune_ts"
+    )
+    _HOMER_RUNS_ROOT = _PathHomer.home() / ".local/share/handsneyes/runs"
+
+    def _homer_read_last_tune_ts() -> float:
+        try:
+            return float(_HOMER_LAST_TUNE_TS.read_text().strip())
+        except Exception:
+            return 0.0
+
+    def _homer_write_last_tune_ts(ts: float) -> None:
+        try:
+            _HOMER_LAST_TUNE_TS.parent.mkdir(
+                parents=True, exist_ok=True, mode=0o700,
+            )
+            _HOMER_LAST_TUNE_TS.write_text(f"{ts}\n")
+        except Exception:
+            logger.exception("could not persist last_tune_ts")
+
+    def _homer_count_trajectories_since(ts: float) -> int:
+        """Count homer history.jsonl files newer than ts.
+
+        Survives cc restart: the count is derived from disk, not from
+        an in-process counter. So 'samples accumulated since last tune'
+        is correct even after cc bouncing.
+        """
+        if not _HOMER_RUNS_ROOT.exists():
+            return 0
+        n = 0
+        for hist in _HOMER_RUNS_ROOT.glob("**/homer/*/history.jsonl"):
+            try:
+                if hist.stat().st_mtime >= ts:
+                    n += 1
+            except OSError:
+                pass
+        return n
+
+    def _homer_copy_dir_contents(src: _PathHomer, dst: _PathHomer) -> None:
+        """Mirror src/* into dst/ (replacing existing files). Both dirs
+        must already exist. Used for slot operations on a directory
+        that is a checked-out git tree — we mutate file contents
+        in place rather than swapping the dir itself."""
+        import shutil as _shutil
+        for f in src.iterdir():
+            if f.is_file():
+                _shutil.copy2(f, dst / f.name)
+
+    def _homer_install_with_rotation(candidate: _PathHomer) -> None:
+        """Backup live -> previous, then install candidate -> live."""
+        import shutil as _shutil
+        if _HOMER_LIVE.exists():
+            _HOMER_PREV.parent.mkdir(parents=True, exist_ok=True)
+            if _HOMER_PREV.exists():
+                _shutil.rmtree(_HOMER_PREV)
+            _shutil.copytree(_HOMER_LIVE, _HOMER_PREV)
+        _HOMER_LIVE.mkdir(parents=True, exist_ok=True)
+        _homer_copy_dir_contents(candidate, _HOMER_LIVE)
+
+    def _homer_swap_live_and_previous() -> bool:
+        """Swap Live <-> Previous. Returns False if no previous slot.
+
+        Implementation note: Live is a git-tracked dir; we mutate
+        its files in place rather than replacing the directory itself,
+        so other tooling watching that path keeps working."""
+        import shutil as _shutil
+        if not _HOMER_PREV.exists():
+            return False
+        if not _HOMER_LIVE.exists():
+            _HOMER_LIVE.mkdir(parents=True, exist_ok=True)
+        tmp = _HOMER_PREV.parent / "_swap_tmp"
+        if tmp.exists():
+            _shutil.rmtree(tmp)
+        _shutil.copytree(_HOMER_LIVE, tmp)
+        # Replace live with previous
+        for f in list(_HOMER_LIVE.iterdir()):
+            if f.is_file():
+                f.unlink()
+        _homer_copy_dir_contents(_HOMER_PREV, _HOMER_LIVE)
+        # Replace previous with the old live
+        _shutil.rmtree(_HOMER_PREV)
+        _shutil.copytree(tmp, _HOMER_PREV)
+        _shutil.rmtree(tmp)
+        return True
+
     @app.get("/api/homer/training-state")
     def homer_training_state() -> JSONResponse:
+        last_tune_ts = _homer_read_last_tune_ts()
         return JSONResponse({
             "n_trajectories_since_train": (
-                app.state.n_trajectories_since_train
+                _homer_count_trajectories_since(last_tune_ts)
             ),
+            "last_tune_ts": last_tune_ts,
+            "has_previous": _HOMER_PREV.exists(),
             "is_retraining": app.state.is_retraining,
             "last_retrain": app.state.last_retrain,
         })
 
     @app.post("/api/homer/retrain")
     async def homer_retrain() -> JSONResponse:
-        """Run scripts/retrain_homer.py as a background subprocess.
+        """Tune the homer's pointer_accel model on accumulated data.
 
-        The script: builds dataset (canary-excluded + sanity-gated) →
-        trains a new vN+1 → canary-evals against the previous
-        checkpoint → installs if the regression check passes, deletes
-        the new dir if it doesn't. We just orchestrate, stream
-        output to the LogBus, and on success hot-reload the homer's
-        model caches so the next click_at picks up the new
-        checkpoint without cc restart.
+        Flow: build dataset (excluding bad active-learning rows) →
+        warm-start from currently-shipped Live → train → on training
+        success, rotate slots (Live → Previous, candidate → Live) and
+        persist the tune timestamp so the trajectory counter resets.
+
+        No canary gate — the operator's safety net is the Rollback
+        button, which swaps Live ↔ Previous. The trade is: minor model
+        regressions might briefly ship before the operator notices and
+        rolls back, in exchange for the loop being autonomous.
         """
         if app.state.is_retraining:
             raise HTTPException(409, "retrain already in progress")
@@ -2052,6 +2157,8 @@ def create_app(
             import sys as _sys
             from pathlib import Path as _Path
             summary_path = _Path("/tmp/retrain_summary.json")
+            installed = False
+            install_error: str | None = None
             try:
                 proc = await asyncio.create_subprocess_exec(
                     _sys.executable, "scripts/retrain_homer.py",
@@ -2075,22 +2182,48 @@ def create_app(
                     verdict = json.loads(summary_path.read_text())
                 except Exception:
                     verdict = None
+                # Find the candidate checkpoint dir for pointer_accel.
+                # retrain_homer.py either kept it (accepted), or
+                # deleted it (rejected by canary / eval_failed).
+                candidate: _Path | None = None
+                ck_root = _Path("data/ml/checkpoints")
+                import re as _re
+                pat = _re.compile(r"^pointer_accel-(?:yaru-)?v(\d+)$")
+                best_n = -1
+                for d in ck_root.glob("pointer_accel-*"):
+                    m = pat.match(d.name)
+                    if not m or not (d / "config.json").exists():
+                        continue
+                    n = int(m.group(1))
+                    try:
+                        if d.stat().st_mtime < _time_local.time() - 3600:
+                            continue  # not from this run (older than 1h)
+                    except OSError:
+                        continue
+                    if n > best_n:
+                        best_n = n
+                        candidate = d
+                if rc == 0 and candidate is not None:
+                    try:
+                        _homer_install_with_rotation(candidate)
+                        _homer_write_last_tune_ts(_time_local.time())
+                        installed = True
+                    except Exception as e:
+                        install_error = f"slot rotation failed: {e}"
+                        logger.exception("slot rotation failed")
                 app.state.last_retrain = {
                     "rc": rc, "verdict": verdict,
+                    "installed": installed,
+                    "install_error": install_error,
+                    "candidate": candidate.name if candidate else None,
                     "ts": _time_local.time(),
                 }
-                if verdict and verdict.get("any_accepted"):
-                    # Hot-reload: a new instance of VisualServoHomer
-                    # is constructed per click_at, so it'll pick up
-                    # the new checkpoints automatically on the next
-                    # click. No explicit reload needed because the
-                    # candidate list is read at __init__ time.
-                    app.state.n_trajectories_since_train = 0
                 bus.publish(_LogEvent(
                     ts=_time_local.time(), level="INFO", source="retrain",
                     msg=(
-                        f"retrain done rc={rc} "
-                        f"accepted={verdict.get('any_accepted') if verdict else None}"
+                        f"tune done rc={rc} candidate={candidate.name if candidate else 'none'} "
+                        f"installed={installed} "
+                        + (f"err={install_error}" if install_error else "")
                     ),
                     run_id=None,
                 ))
@@ -2099,6 +2232,7 @@ def create_app(
                 import time as _time_local
                 app.state.last_retrain = {
                     "rc": -1, "verdict": None, "error": str(e),
+                    "installed": False,
                     "ts": _time_local.time(),
                 }
             finally:
@@ -2108,29 +2242,16 @@ def create_app(
 
     @app.post("/api/homer/rollback")
     def homer_rollback() -> JSONResponse:
-        """Remove the NEWEST checkpoint of each family, so the homer
-        falls back to the previous one on the next click. Doesn't
-        delete the only-remaining checkpoint of a family (we'd lose
-        the homer entirely)."""
-        import re as _re
-        import shutil as _shutil
-        from pathlib import Path as _Path
-        ck_root = _Path("data/ml/checkpoints")
-        rolled_back = []
-        for family in ("pointer_accel", "longjump"):
-            pat = _re.compile(rf"^{family}-v(\d+)$")
-            dirs = []
-            for d in ck_root.glob(f"{family}-v*"):
-                m = pat.match(d.name)
-                if m and (d / "config.json").exists():
-                    dirs.append((int(m.group(1)), d))
-            dirs.sort(reverse=True)
-            if len(dirs) >= 2:
-                newest = dirs[0][1]
-                _shutil.rmtree(newest, ignore_errors=True)
-                rolled_back.append(newest.name)
-        return JSONResponse({
-            "ok": True, "rolled_back": rolled_back,
-        })
+        """Swap Live <-> Previous slots. Idempotent under the same
+        previous: clicking Rollback twice puts you back where you
+        started. Returns 404 if there is no Previous slot."""
+        import time as _time_local
+        if not _homer_swap_live_and_previous():
+            raise HTTPException(404, "no previous slot to roll back to")
+        # Persist a fresh tune timestamp so the trajectory counter
+        # resets at the rollback point — clicks accumulated since the
+        # bad install should count toward the next tune attempt.
+        _homer_write_last_tune_ts(_time_local.time())
+        return JSONResponse({"ok": True})
 
     return app

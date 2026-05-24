@@ -104,11 +104,11 @@
         <button id="btn-exec-script" type="button" class="quick"
                 title="Open a textarea, paste a shell script, run it on the target">Execute Script…</button>
         <button id="btn-retrain" type="button" class="quick"
-                title="Build dataset + retrain pointer-accel and long-jump models on accumulated clicks; canary eval gates installation.">
-          Retrain homer <span id="retrain-count">(0 new)</span>
+                title="Fine-tune the currently-installed pointer-accel model on samples collected since the last tune. Warm-starts from Live; on completion the new model is auto-installed (the prior Live is saved to a one-deep Previous slot for Rollback).">
+          Tune homer <span id="retrain-count">(0 new)</span>
         </button>
-        <button id="btn-rollback" type="button" class="quick"
-                title="Remove the newest pointer-accel + long-jump checkpoints so the homer falls back to the previous ones. Use if a fresh retrain made clicks worse.">
+        <button id="btn-rollback" type="button" class="quick" disabled
+                title="Swap Live <-> Previous model slots. Click again to restore. Disabled when there is no Previous slot yet.">
           Rollback
         </button>
       </div>

@@ -754,6 +754,8 @@ const $btnRollback = document.getElementById("btn-rollback");
 const $retrainCount = document.getElementById("retrain-count");
 let _retrainInFlight = false;
 
+let _lastInstallNoticeTs = 0;
+
 async function refreshRetrainState() {
   try {
     const r = await fetch("/api/homer/training-state");
@@ -763,12 +765,34 @@ async function refreshRetrainState() {
     $retrainCount.textContent = `(${n} new)`;
     if (j.is_retraining || _retrainInFlight) {
       $btnRetrain.disabled = true;
-      $btnRetrain.textContent = "Retraining…";
+      $btnRetrain.textContent = "Tuning…";
     } else {
       $btnRetrain.disabled = false;
       // Restore button text + the span.
-      $btnRetrain.textContent = "Retrain homer ";
+      $btnRetrain.textContent = "Tune homer ";
       $btnRetrain.appendChild($retrainCount);
+    }
+    // Rollback enabled only when a Previous slot exists.
+    if ($btnRollback) $btnRollback.disabled = !j.has_previous;
+    // Surface install verdict once when a tune finishes.
+    if (
+      j.last_retrain && j.last_retrain.ts
+      && j.last_retrain.ts > _lastInstallNoticeTs
+      && !j.is_retraining
+    ) {
+      _lastInstallNoticeTs = j.last_retrain.ts;
+      const lr = j.last_retrain;
+      if (lr.installed) {
+        appendSystemLog(
+          "INFO",
+          `tune complete — installed ${lr.candidate || "candidate"}. ` +
+          "Use Rollback if clicks got worse."
+        );
+      } else if (lr.install_error) {
+        appendSystemLog("ERROR", `tune install failed: ${lr.install_error}`);
+      } else if (lr.rc !== 0) {
+        appendSystemLog("ERROR", `tune failed (rc=${lr.rc}); model unchanged.`);
+      }
     }
   } catch (e) { /* ignore */ }
 }
@@ -776,11 +800,12 @@ async function refreshRetrainState() {
 $btnRetrain?.addEventListener("click", async () => {
   if (_retrainInFlight) return;
   const confirmMsg =
-    "Retrain pointer-accel + long-jump models on accumulated clicks?\n\n" +
-    "• Build the dataset (canary-excluded, sanity-gated).\n" +
-    "• Train new vN+1 checkpoints.\n" +
-    "• Canary eval: if the new model regresses by >1.5× on the\n" +
-    "  held-out set, it gets rejected and the previous stays.\n" +
+    "Tune the pointer-accel model on samples collected since the last tune?\n\n" +
+    "• Warm-starts from the currently-installed model.\n" +
+    "• Excludes the explore_v2 active-learning rows (known to regress).\n" +
+    "• On completion the new model is auto-installed and the prior\n" +
+    "  Live is saved to a one-deep Previous slot.\n" +
+    "• Click Rollback if the new model makes clicks worse.\n" +
     "• Training takes ~30-60s; clicks continue working in parallel.";
   if (!window.confirm(confirmMsg)) return;
   _retrainInFlight = true;
@@ -789,10 +814,10 @@ $btnRetrain?.addEventListener("click", async () => {
     const r = await fetch("/api/homer/retrain", { method: "POST" });
     if (!r.ok) {
       const t = await r.text().catch(() => "");
-      window.alert(`retrain failed to start: ${r.status} ${t}`);
+      window.alert(`tune failed to start: ${r.status} ${t}`);
     }
   } catch (e) {
-    window.alert(`retrain error: ${e}`);
+    window.alert(`tune error: ${e}`);
   } finally {
     _retrainInFlight = false;
     refreshRetrainState();
@@ -801,20 +826,20 @@ $btnRetrain?.addEventListener("click", async () => {
 
 $btnRollback?.addEventListener("click", async () => {
   if (!window.confirm(
-    "Roll back homer checkpoints?\n\n" +
-    "Removes the newest pointer-accel and long-jump checkpoints. " +
-    "The homer falls back to the previous ones on the next click. " +
-    "Use this if a fresh retrain made clicks visibly worse."
+    "Swap Live <-> Previous pointer-accel model?\n\n" +
+    "Atomic: the model the homer loads on the next click is the one " +
+    "that was Previous before this rollback. Clicking Rollback again " +
+    "puts you back where you were — it's a toggle."
   )) return;
   try {
     const r = await fetch("/api/homer/rollback", { method: "POST" });
-    const j = await r.json();
-    window.alert(
-      "Rolled back: " +
-      (j.rolled_back && j.rolled_back.length
-        ? j.rolled_back.join(", ")
-        : "(nothing to roll back — already at oldest)")
-    );
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      window.alert(`rollback failed: ${r.status} ${t}`);
+      return;
+    }
+    appendSystemLog("INFO", "rolled back — Live <-> Previous swapped.");
+    refreshRetrainState();
   } catch (e) {
     window.alert(`rollback error: ${e}`);
   }
