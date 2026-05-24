@@ -156,6 +156,25 @@ class VaultCreateRequest(BaseModel):
     overwrite: bool = False
 
 
+class VaultUnlockSessionRequest(BaseModel):
+    # Master passphrase for the vault. Cached in app.state for the
+    # cc process lifetime; lets later /api/keyboard/from-vault calls
+    # type entries without an external caller needing the passphrase
+    # or the entry value. Cleared on /api/vault/lock-session and on
+    # cc shutdown.
+    passphrase: str = Field(min_length=1, max_length=512)
+
+
+class KeyboardFromVaultRequest(BaseModel):
+    # Vault entry name (e.g. "desktop") whose value should be typed
+    # at the host's currently-focused field. The value is NEVER
+    # returned in the response or logged, only its length.
+    entry: str = Field(min_length=1, max_length=128)
+    # Press Enter after typing the value — useful for sudo prompts
+    # and password fields that submit on Enter.
+    append_enter: bool = True
+
+
 class SyncTextRequest(BaseModel):
     # ROI centred on (x_pct, y_pct). Defaults to the last click_at
     # position so just clicking into a text field is enough setup.
@@ -252,6 +271,12 @@ def create_app(
     app.state.n_trajectories_since_train = 0
     app.state.last_retrain = None  # dict | None — most recent verdict
     app.state.is_retraining = False
+    # Cached vault passphrase for the session. Once an operator
+    # unlocks the vault via /api/vault/unlock-session, later
+    # /api/keyboard/from-vault calls can type stored entries without
+    # the caller needing to know either the passphrase or the value.
+    # Lives in process memory only — gone on cc restart.
+    app.state.vault_passphrase = None
 
     @app.on_event("startup")
     async def _on_startup() -> None:
@@ -1905,6 +1930,83 @@ def create_app(
             "path": str(path),
             "entry_name": req.entry_name,
         })
+
+    @app.post("/api/vault/unlock-session")
+    async def vault_unlock_session(
+        req: VaultUnlockSessionRequest,
+    ) -> JSONResponse:
+        """Cache the vault passphrase for the cc process lifetime.
+
+        Validates the passphrase by opening the vault and listing its
+        entries. On success, the passphrase is held in app.state and
+        used by /api/keyboard/from-vault to type stored values into
+        the host. Returns the list of entry names so the operator
+        knows which entries are available — never returns values.
+        """
+        from handsneyes.core.vault import Vault
+        try:
+            vault = Vault(req.passphrase)
+            entries = vault.names()
+        except Exception as e:
+            raise HTTPException(401, f"vault unlock failed: {e}")
+        app.state.vault_passphrase = req.passphrase
+        logger.info(
+            "vault session unlocked; %d entries available", len(entries),
+        )
+        return JSONResponse({"ok": True, "entries": entries})
+
+    @app.post("/api/vault/lock-session")
+    def vault_lock_session() -> JSONResponse:
+        """Forget the cached vault passphrase."""
+        app.state.vault_passphrase = None
+        return JSONResponse({"ok": True})
+
+    @app.post("/api/keyboard/from-vault")
+    async def keyboard_from_vault(
+        req: KeyboardFromVaultRequest,
+    ) -> JSONResponse:
+        """Type a vault entry's value at the host's focused field.
+
+        Lets agentic callers (an LLM driving the cc) hand the host a
+        password — typically for a sudo or login prompt — without ever
+        seeing the value themselves. The flow is:
+
+          vault file -> kb backend bytes -> Pi BT HID -> host keyboard
+
+        Never returns or logs the actual value, only its length.
+
+        Requires a prior /api/vault/unlock-session call. Returns 401
+        if no passphrase is cached.
+        """
+        if app.state.vault_passphrase is None:
+            raise HTTPException(
+                401,
+                "no vault session — call /api/vault/unlock-session first",
+            )
+        from handsneyes.core.vault import Vault
+        try:
+            vault = Vault(app.state.vault_passphrase)
+            value = vault.get(req.entry)
+        except KeyError:
+            raise HTTPException(404, f"vault has no entry {req.entry!r}")
+        except Exception as e:
+            raise HTTPException(500, f"vault read failed: {e}")
+
+        async def _type(kb):
+            try:
+                await kb.send_text(value, secret=True)
+            except TypeError:
+                # Older backend signature without secret kwarg.
+                await kb.send_text(value)
+            if req.append_enter:
+                await kb.send_keystroke("Enter")
+            return JSONResponse({
+                "ok": True,
+                "entry": req.entry,
+                "length": len(value),
+                "append_enter": req.append_enter,
+            })
+        return await _with_keyboard(_type)
 
     @app.get("/api/state")
     def state() -> JSONResponse:
