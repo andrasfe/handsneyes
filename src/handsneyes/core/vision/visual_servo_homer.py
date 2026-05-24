@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -139,10 +140,21 @@ DEFAULT_PCT_PER_HID = 1.6 / 1920.0
 # size DOWN-RIGHT of the hotspot (default arrow points up-left, hotspot
 # at the tip). To make the click land on the target, we aim the
 # centroid at ``target + HOTSPOT_OFFSET`` so the hotspot ends up on
-# the original target. In practice the cursor also overshoots aim
-# slightly so a small offset is sufficient.
-HOTSPOT_OFFSET_X_PCT = 0.005
-HOTSPOT_OFFSET_Y_PCT = 0.005
+# the original target.
+#
+# Asymmetric because the screen is 16:9: equal normalized offsets give
+# unequal pixel offsets (X=0.005 × 1920 = 10 px, Y=0.005 × 1080 = 5 px).
+# Most cursors are taller than wide so the Y offset in pixels should
+# be at least equal to X, hence default Y=0.010.
+#
+# Override via env vars when a specific host's cursor doesn't match
+# the defaults. After tuning, set them permanently in shell rc.
+HOTSPOT_OFFSET_X_PCT = float(os.environ.get(
+    "HANDSNEYES_HOTSPOT_OFFSET_X_PCT", "0.005",
+))
+HOTSPOT_OFFSET_Y_PCT = float(os.environ.get(
+    "HANDSNEYES_HOTSPOT_OFFSET_Y_PCT", "0.010",
+))
 
 MAX_STEPS = 30
 PROOF_DIR = Path("/tmp/handsneyes_homer")
