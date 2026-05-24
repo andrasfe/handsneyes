@@ -99,8 +99,15 @@ Models ship inside the platform package:
 Adapter exposes `pointer_accel_checkpoint()` / `longjump_checkpoint()`. The `VisualServoHomer` searches the platform-bundled paths first, then falls back to the legacy `data/ml/checkpoints/*` locations.
 
 **Current shipped models (Yaru white cursor):**
-- `pointer_accel-yaru-v4` (hidden=64, 2333 training rows, val_mse 0.0096, **canary median 8.5 steps**, range 6-13)
+- `pointer_accel-yaru-v6` (hidden=64, 4083 training rows, val_mse 0.032, **canary median 9.5, mean 10.0, range 5-17**)
 - `longjump-yaru-v1` (25-trajectory dataset, marginal quality; runtime falls back to closed-loop seed when it misfires)
+
+**Retrain history (Yaru):**
+- v4: 2333 rows, click_at-collected. Original baseline. Median 8.5 on its first canary; drifted to ~10 over weeks of use.
+- v5: +500 active-learning rows (`explore_pointer_accel_v2.py`). Regressed (canary median 9.5 → 10.5). Rolled back.
+- v6: +1000 more active-learning rows on top of v5's corpus → 4083 train / 505 val / 488 test. Beat the same-session v4 baseline on every metric (median 9.5 vs 10.0, mean 10.0 vs 11.25, min 5 vs 8). Shipped.
+
+Lesson from v5 → v6: small active-learning batches (500 rows) are too dilute against a 2333-row baseline corpus to move the model; need ≥1000 to make the new distribution dominant. The val_mse number gets *worse* as the active-learning rows mix in (they're inherently harder samples), but the canary is the only ground truth — don't reject a retrain on val_mse alone.
 
 ## ML training pipeline
 

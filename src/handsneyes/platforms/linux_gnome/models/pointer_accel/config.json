@@ -12,7 +12,7 @@
     "hid_dy_norm"
   ],
   "augmented": true,
-  "train_rows": 7580,
-  "val_rows": 217,
+  "train_rows": 16332,
+  "val_rows": 505,
   "platform": "ubuntu-libinput-adaptive"
 }
