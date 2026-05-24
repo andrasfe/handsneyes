@@ -126,6 +126,12 @@ def main() -> int:
              "from overlapping the eval set used to gate retrains. "
              "Set empty to skip.",
     )
+    ap.add_argument(
+        "--exclude-pattern", action="append", default=[],
+        help="Glob fragment to skip when walking runs. Match is done "
+             "against each history.jsonl's parent dir name + the "
+             "session dir name (e.g. 'explore_v2*'). Repeatable.",
+    )
     args = ap.parse_args()
     since_ts = None
     if args.since:
@@ -151,12 +157,15 @@ def main() -> int:
         print(f"runs root not found: {args.runs_root}", file=sys.stderr)
         return 2
 
+    import fnmatch
+
     rows: list[dict] = []
     n_files = 0
     n_lines = 0
     n_dropped_note = 0
     n_dropped_age = 0
     n_dropped_canary = 0
+    n_dropped_pattern = 0
     for hist_path in _iter_history_files(args.runs_root):
         if since_ts is not None:
             try:
@@ -164,6 +173,18 @@ def main() -> int:
                     n_dropped_age += 1
                     continue
             except OSError:
+                continue
+        # Skip excluded session dirs (e.g. explore_v2*).
+        if args.exclude_pattern:
+            rel = hist_path.relative_to(args.runs_root)
+            parts = rel.parts
+            skip = any(
+                fnmatch.fnmatch(part, pat)
+                for part in parts
+                for pat in args.exclude_pattern
+            )
+            if skip:
+                n_dropped_pattern += 1
                 continue
         n_files += 1
         traj_id = str(hist_path.parent.relative_to(args.runs_root))
@@ -196,6 +217,8 @@ def main() -> int:
         print(f"dropped {n_dropped_note} non-HSV row(s)")
     if n_dropped_canary:
         print(f"dropped {n_dropped_canary} canary trajectory(s)")
+    if n_dropped_pattern:
+        print(f"dropped {n_dropped_pattern} excluded-pattern file(s)")
 
     print(
         f"scanned {n_files} history.jsonl file(s), {n_lines} step "
