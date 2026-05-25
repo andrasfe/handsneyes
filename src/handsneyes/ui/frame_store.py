@@ -71,10 +71,18 @@ class FrameStore:
         watch_dir: Path = DEFAULT_WATCH_DIR,
         max_frames: int = DEFAULT_MAX_FRAMES,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
+        delete_on_evict: bool = True,
     ) -> None:
         self.watch_dir = Path(watch_dir)
         self.max_frames = max_frames
         self.poll_interval = poll_interval
+        # When True, unlinking the file on disk follows the in-memory
+        # eviction. Without this, the watch_dir grows unbounded across
+        # sessions (the in-memory deque caps at max_frames, but on-disk
+        # PNGs accumulated forever — quickly fills up dev macs).
+        # The training pipeline reads history.jsonl, not PNGs, so the
+        # only cost is replayability of stale runs.
+        self.delete_on_evict = delete_on_evict
         self._frames: deque[FrameMeta] = deque(maxlen=max_frames)
         self._by_id: dict[int, FrameMeta] = {}
         self._seen_paths: set[str] = set()
@@ -88,8 +96,58 @@ class FrameStore:
         if self._task is not None:
             return
         self.watch_dir.mkdir(parents=True, exist_ok=True)
+        # One-shot startup cleanup: if disk has more than max_frames
+        # PNGs across all run dirs (typical after long-running cc with
+        # many click_at sessions), trim down to the newest max_frames
+        # BEFORE the initial scan. Without this, an old run from
+        # weeks ago would leave thousands of PNGs that the deque can't
+        # see but the disk still carries.
+        if self.delete_on_evict:
+            self._cleanup_disk_to_max()
         await self._scan_once(initial=True)
         self._task = asyncio.create_task(self._run(), name="frame-watcher")
+
+    def _cleanup_disk_to_max(self) -> None:
+        """Delete image files beyond max_frames newest, across all run
+        subdirs of watch_dir. Best-effort: a file we can't stat or
+        delete is logged at debug and skipped."""
+        all_files: list[tuple[float, str]] = []
+        try:
+            for run_entry in os.scandir(self.watch_dir):
+                if not run_entry.is_dir():
+                    continue
+                try:
+                    inner = os.scandir(run_entry.path)
+                except OSError:
+                    continue
+                for f in inner:
+                    if not f.is_file():
+                        continue
+                    if Path(f.path).suffix.lower() not in IMAGE_SUFFIXES:
+                        continue
+                    try:
+                        all_files.append((f.stat().st_mtime, f.path))
+                    except OSError:
+                        continue
+        except OSError as e:
+            logger.debug("frame_store cleanup scan failed: %s", e)
+            return
+        if len(all_files) <= self.max_frames:
+            return
+        all_files.sort(reverse=True)  # newest first
+        to_delete = all_files[self.max_frames:]
+        ok = 0
+        for _, path in to_delete:
+            try:
+                os.unlink(path)
+                ok += 1
+            except OSError as e:
+                logger.debug("could not delete %s: %s", path, e)
+        logger.info(
+            "frame_store: startup cleanup removed %d/%d old frame "
+            "PNG(s); kept newest %d",
+            ok, len(to_delete), self.max_frames,
+        )
 
     async def stop(self) -> None:
         self._stop.set()
@@ -166,6 +224,15 @@ class FrameStore:
                 ):
                     evicted = self._frames[0]
                     self._by_id.pop(evicted.id, None)
+                    self._seen_paths.discard(evicted.path)
+                    if self.delete_on_evict:
+                        try:
+                            os.unlink(evicted.path)
+                        except OSError as e:
+                            logger.debug(
+                                "frame_store: could not unlink %s: %s",
+                                evicted.path, e,
+                            )
                 self._frames.append(m)
                 self._by_id[m.id] = m
                 self._latest_id = m.id

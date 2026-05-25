@@ -850,9 +850,11 @@ $btnRollback?.addEventListener("click", async () => {
   }
 });
 
-// Poll retrain state every 5s so the counter stays fresh and we
-// can show "Retraining…" if another tab kicked off training.
-setInterval(refreshRetrainState, 5000);
+// Poll retrain state every 30 s — the trajectory count only changes
+// once per click_at and the "Tuning…" state from a cross-tab retrain
+// catches up at the next tick. Was 5 s, which generated ~12 GET/min
+// of pure background noise.
+setInterval(refreshRetrainState, 30000);
 refreshRetrainState();
 
 // ESC closes the modal when it's open.
@@ -2315,7 +2317,10 @@ async function init() {
   connectGlobalLogs();
   pollLatest();
   // Periodic re-list to catch ring-buffer evictions / deep history.
-  setInterval(refreshKnownIds, 5000);
+  // 30 s is enough: pollLatest()'s long-poll already pushes new
+  // frames in real time. This poll is a backup that resyncs the
+  // knownIds list (used by Prev/Next nav and for evicted entries).
+  setInterval(refreshKnownIds, 30000);
 }
 
 init();
