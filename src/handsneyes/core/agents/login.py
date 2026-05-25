@@ -175,6 +175,49 @@ class LoginAgent(Agent):
                 # Polling never saw a login screen. Before failing, check
                 # whether the target is already unlocked — if so, the unlock
                 # task is a no-op success.
+                #
+                # SANITY GUARD: refuse the already-unlocked claim if the
+                # frame is degenerate (SMPTE test pattern, near-black, or
+                # uniform color). Without this, a webcam on the macOS
+                # placeholder pattern → VLM says "looks like a screen" →
+                # we falsely report "unlocked" while the host is actually
+                # still on the lock screen. Empirically observed.
+                if self.ctx.capture is not None:
+                    try:
+                        import cv2 as _cv2
+                        import numpy as _np
+                        frame = await self.ctx.capture.capture_frame()
+                        img = frame.image
+                        gray = (
+                            img if img.ndim == 2
+                            else _cv2.cvtColor(img, _cv2.COLOR_BGR2GRAY)
+                        )
+                        vert_grad = float(
+                            _np.abs(_np.diff(gray.astype(_np.int16), axis=0)
+                            ).mean()
+                        )
+                        brightness = float(gray.mean()) / 255.0
+                        if vert_grad < 1.5:
+                            return LoginOutcome(
+                                success=False,
+                                reason=(
+                                    "webcam on test pattern (vert_grad="
+                                    f"{vert_grad:.2f}); refusing to claim "
+                                    "unlock. Replug the cam."
+                                ),
+                                data={"verified": False},
+                            )
+                        if brightness < 0.10:
+                            return LoginOutcome(
+                                success=False,
+                                reason=(
+                                    f"frame too dark (brightness={brightness:.3f}); "
+                                    "refusing to claim already-unlocked"
+                                ),
+                                data={"verified": False},
+                            )
+                    except Exception as e:
+                        logger.debug("sanity-guard capture failed: %s", e)
                 already_unlocked = await VerifyAgent(self.ctx).run(
                     question=ALREADY_UNLOCKED_QUESTION, visual_only=True,
                 )

@@ -254,5 +254,15 @@ class TestLoginAgent:
 
 
 def _blank_image():  # noqa: ANN202
+    """Textured, mid-brightness fake frame. NOT a uniform color: the
+    LoginAgent's already-unlocked sanity guard rejects frames with
+    vertical-gradient < 1.5 (the macOS test-pattern signature), so a
+    uniform image would short-circuit the tests. Adds Gaussian noise
+    on top of a mid-gray base so vert_grad clears the threshold while
+    brightness still lands in the "normal screen" band."""
     import numpy as np
-    return np.full((64, 64, 3), 200, dtype=np.uint8)
+    rng = np.random.default_rng(0)
+    base = np.full((64, 64, 3), 128, dtype=np.int16)
+    noise = rng.integers(-40, 40, size=(64, 64, 3), dtype=np.int16)
+    img = np.clip(base + noise, 0, 255).astype(np.uint8)
+    return img
