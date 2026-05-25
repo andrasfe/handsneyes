@@ -1072,7 +1072,11 @@ $frame.addEventListener("mousedown", (e) => {
   _isDragging = false;
 });
 
-$frame.addEventListener("mousemove", (e) => {
+// Mousemove + mouseup attach to window — a drag that started on the
+// screenshot must still complete when the cursor escapes the image
+// rect before release. With $frame-only listeners, releasing outside
+// the screenshot silently dropped the drag intent.
+window.addEventListener("mousemove", (e) => {
   if (!_mouseDownPos) return;
   const dx = e.clientX - _mouseDownPos.clientX;
   const dy = e.clientY - _mouseDownPos.clientY;
@@ -1081,28 +1085,40 @@ $frame.addEventListener("mousemove", (e) => {
   }
 });
 
-$frame.addEventListener("mouseup", async (e) => {
+window.addEventListener("mouseup", async (e) => {
   if (!_mouseDownPos) return;
-  if (!_isDragging) { _mouseDownPos = null; return; }
-  // It's a drag. Compute the destination, fire /api/mouse/drag,
-  // and suppress the click event that will follow this mouseup.
   const start = _mouseDownPos;
   _mouseDownPos = null;
+  if (!_isDragging) {
+    // Plain click — let the click event handler do its thing. Do NOT
+    // suppress (we want click_at to fire).
+    return;
+  }
   _isDragging = false;
   _suppressNextClick = true;
-  // Also cancel any pending single-click debounce so the click handler
-  // can't sneak in a click_at on top of our drag.
+  // Self-clear in case no click event arrives (mouseup outside the
+  // frame doesn't always trigger one). Otherwise the flag would eat
+  // the next unrelated click. 100 ms is well past the same-microtask
+  // synthetic-click window but short enough to never wedge real
+  // interactions.
+  setTimeout(() => { _suppressNextClick = false; }, 100);
   if (_pendingSingleClickTimer != null) {
     clearTimeout(_pendingSingleClickTimer);
     _pendingSingleClickTimer = null;
   }
   const rect = imageRect();
   if (!rect) return;
-  const x = e.clientX - rect.left;
-  const y = e.clientY - rect.top;
-  const to_x_pct = Math.max(0, Math.min(1, x / rect.width));
-  const to_y_pct = Math.max(0, Math.min(1, y / rect.height));
-  showClickMarker(e.clientX, e.clientY);
+  // Clamp the destination to the screenshot bounds. If the user
+  // dragged past the edge, the natural intent is "drop at the edge"
+  // — not "drop at undefined off-screen coordinates".
+  const x = Math.max(0, Math.min(rect.width,  e.clientX - rect.left));
+  const y = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
+  const to_x_pct = x / rect.width;
+  const to_y_pct = y / rect.height;
+  showClickMarker(
+    rect.left + x,  // place marker at the clamped point
+    rect.top  + y,
+  );
   appendSystemLog(
     "INFO",
     `mouse drag (${start.x_pct.toFixed(3)},${start.y_pct.toFixed(3)}) → ` +
