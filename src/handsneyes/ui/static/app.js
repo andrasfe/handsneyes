@@ -443,6 +443,14 @@ $chatForm.addEventListener("submit", async (e) => {
 });
 
 // ── quick actions: Lock / Unlock ──────────────────────────────
+function _releaseQuickButtons() {
+  state.busy = false;
+  $btnSend.disabled = false;
+  if ($btnLock) $btnLock.disabled = false;
+  if ($btnUnlock) $btnUnlock.disabled = false;
+  if ($btnExecScript) $btnExecScript.disabled = false;
+}
+
 async function startRun(body, fallbackIntent) {
   if (state.busy) return;
   state.busy = true;
@@ -450,6 +458,7 @@ async function startRun(body, fallbackIntent) {
   $btnLock.disabled = true;
   $btnUnlock.disabled = true;
   if ($btnExecScript) $btnExecScript.disabled = true;
+  let pollStarted = false;
   try {
     const r = await fetch("/api/run", {
       method: "POST",
@@ -458,12 +467,12 @@ async function startRun(body, fallbackIntent) {
     });
     if (r.status === 409) {
       appendSystemLog("ERROR", "another run is already in progress");
-      return;
+      return;  // finally re-enables (poll not started)
     }
     if (!r.ok) {
       const t = await r.text();
       appendSystemLog("ERROR", `run rejected: ${t}`);
-      return;
+      return;  // finally re-enables (poll not started)
     }
     const rec = await r.json();
     appendChat({
@@ -471,20 +480,16 @@ async function startRun(body, fallbackIntent) {
       intent: rec.intent || fallbackIntent,
       status: rec.status,
     });
-    pollRunStatus(rec.run_id);
+    pollStarted = true;
+    pollRunStatus(rec.run_id);  // re-enables on terminal status
   } catch (err) {
     appendSystemLog("ERROR", String(err));
   } finally {
-    // pollRunStatus re-enables Send on terminal status, but for the
-    // synchronous error paths above we have to release the buttons
-    // here. pollRunStatus also re-enables, so calling twice is fine.
-    if (state.busy) {
-      // poll is still running; leave buttons disabled.
-    } else {
-      $btnSend.disabled = false;
-      $btnLock.disabled = false;
-      $btnUnlock.disabled = false;
-    }
+    // Only leave buttons disabled while a poll is running. Every
+    // other exit path (409, non-ok, exception) needs to release
+    // the buttons here — otherwise state.busy stays true forever
+    // and Unlock / Lock / Execute Script appear stuck.
+    if (!pollStarted) _releaseQuickButtons();
   }
 }
 
