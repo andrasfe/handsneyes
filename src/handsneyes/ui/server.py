@@ -74,14 +74,6 @@ class MouseClickAtRequest(BaseModel):
     x_pct: float = Field(ge=0.0, le=1.0)
     y_pct: float = Field(ge=0.0, le=1.0)
     button: str = Field(default="left", pattern="^(left|right|middle)$")
-
-
-class MouseDragRequest(BaseModel):
-    from_x_pct: float = Field(ge=0.0, le=1.0)
-    from_y_pct: float = Field(ge=0.0, le=1.0)
-    to_x_pct: float = Field(ge=0.0, le=1.0)
-    to_y_pct: float = Field(ge=0.0, le=1.0)
-    button: str = Field(default="left", pattern="^(left|right|middle)$")
     # ``count=2`` → home to the pixel and fire a double-click. The
     # homer always fires one click as part of landing; for count > 1
     # we send (count - 1) extra in-place clicks after the home is
@@ -90,6 +82,14 @@ class MouseDragRequest(BaseModel):
     # Optional overrides; defaults come from settings.commander.
     screen_width: int | None = Field(default=None, gt=0)
     screen_height: int | None = Field(default=None, gt=0)
+
+
+class MouseDragRequest(BaseModel):
+    from_x_pct: float = Field(ge=0.0, le=1.0)
+    from_y_pct: float = Field(ge=0.0, le=1.0)
+    to_x_pct: float = Field(ge=0.0, le=1.0)
+    to_y_pct: float = Field(ge=0.0, le=1.0)
+    button: str = Field(default="left", pattern="^(left|right|middle)$")
 
 
 class MouseClickRequest(BaseModel):
