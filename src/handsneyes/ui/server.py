@@ -33,7 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from handsneyes.ui.frame_store import FrameStore
-from handsneyes.ui.log_bus import LogBus, install_logging
+from handsneyes.ui.log_bus import LogBus, LogEvent, install_logging
 from handsneyes.ui.runner import (
     ContextFactory, Runner, RunnerBusy,
 )
