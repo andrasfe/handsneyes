@@ -260,12 +260,43 @@ def _try_load_longjump():
     except Exception as e:
         logger.debug("longjump module unavailable: %s", e)
         return None
-    for cand in _LONGJUMP_CHECKPOINT_CANDIDATES:
+    return None  # sentinel; replaced by _try_load_longjump_for(adapter) below
+
+
+def _try_load_longjump_for(platform_adapter):
+    """Per-platform long-jump loader. Same platform-mismatch protection
+    as _try_load_pointer_accel: when the adapter has no model shipped,
+    don't substitute a different platform's checkpoint."""
+    try:
+        from handsneyes.core.vision.longjump import LongJumpModel
+    except Exception as e:
+        logger.debug("longjump module unavailable: %s", e)
+        return None
+    candidates: list[Path] = []
+    if platform_adapter is not None and hasattr(
+        platform_adapter, "longjump_checkpoint",
+    ):
+        adapter_ckpt = platform_adapter.longjump_checkpoint()
+        if adapter_ckpt is not None:
+            candidates.append(Path(adapter_ckpt))
+        else:
+            plat_name = getattr(platform_adapter, "name", "<unknown>")
+            logger.info(
+                "VisualServoHomer: platform %r has no long-jump "
+                "checkpoint shipped. Slam-to-target first step will "
+                "use ratio-only open-loop seed (slower).",
+                plat_name,
+            )
+            return None
+    else:
+        candidates.extend(_LONGJUMP_CHECKPOINT_CANDIDATES)
+
+    for cand in candidates:
         if (cand / "config.json").exists():
             try:
                 m = LongJumpModel(cand)
                 cal = _LONGJUMP_CALIBRATION.get(cand.name, (1.0, 1.0))
-                m._calibration = cal  # consumed by predict_total_hid
+                m._calibration = cal
                 logger.info(
                     "VisualServoHomer: loaded long-jump seed model "
                     "from %s (calibration=%s)", cand, cal,
@@ -276,31 +307,61 @@ def _try_load_longjump():
                     "longjump model at %s failed to load: %s",
                     cand, e,
                 )
-    logger.warning(
-        "VisualServoHomer: no long-jump checkpoint at %s. The homer "
-        "will work but the slam-to-target first step uses ratio-only "
-        "open-loop (each click takes ~3-5 more iterations than with "
-        "long-jump). Train your own with scripts/collect_pointer_accel.sh "
-        "+ scripts/train_longjump.py — see README "
-        '"Calibrating the homer for your setup".',
-        ", ".join(str(c) for c in _LONGJUMP_CHECKPOINT_CANDIDATES),
-    )
     return None
 
 
-def _try_load_pointer_accel():
+def _try_load_pointer_accel(platform_adapter=None):
     """Best-effort load of the trained open-loop pointer-accel MLP.
 
-    Returns ``None`` if the package or checkpoints are missing — the
-    homer falls back to a ratio-based open-loop seed (still works,
-    just slower convergence).
+    Resolution order:
+      1. ``platform_adapter.pointer_accel_checkpoint()`` — the right
+         per-OS checkpoint as declared by the active platform.
+      2. The shipped linux_gnome path (legacy fallback for callers
+         that don't pass a platform adapter).
+      3. ``data/ml/checkpoints/pointer_accel-vN`` — legacy retrain
+         output, kept for back-compat.
+
+    Critically: when the platform adapter explicitly returns ``None``
+    (e.g. the macos adapter when no macos checkpoint is shipped), we
+    DO NOT fall through to the linux_gnome path. Loading a Linux-
+    libinput-trained model on a macOS IOHID target makes every click
+    wildly off — different acceleration curves entirely. Better to
+    have no seed model and let the closed-loop servo refine from
+    ratio-only than to seed with a wrong-platform model.
     """
     try:
         from handsneyes.core.vision.pointer_accel import PointerAccelModel
     except Exception as e:
         logger.debug("pointer-accel module unavailable: %s", e)
         return None
-    for cand in _POINTER_ACCEL_CHECKPOINT_CANDIDATES:
+
+    candidates: list[Path] = []
+    if platform_adapter is not None and hasattr(
+        platform_adapter, "pointer_accel_checkpoint",
+    ):
+        adapter_ckpt = platform_adapter.pointer_accel_checkpoint()
+        if adapter_ckpt is not None:
+            candidates.append(Path(adapter_ckpt))
+        else:
+            # Adapter says: no model for this platform. Don't load a
+            # different platform's model by accident.
+            plat_name = getattr(platform_adapter, "name", "<unknown>")
+            logger.info(
+                "VisualServoHomer: platform %r has no pointer-accel "
+                "checkpoint shipped. Falling back to ratio-only seed "
+                "— the closed-loop servo will refine from there, but "
+                "first-iteration error will be larger. Train a model "
+                "for this platform via the cc's Tune button or run "
+                "scripts/train_pointer_accel.py against the new corpus.",
+                plat_name,
+            )
+            return None
+    else:
+        # Legacy callers (no adapter passed): keep old behaviour so
+        # tests that construct a bare homer still find a model.
+        candidates.extend(_POINTER_ACCEL_CHECKPOINT_CANDIDATES)
+
+    for cand in candidates:
         if (cand / "config.json").exists():
             try:
                 m = PointerAccelModel(cand)
@@ -317,11 +378,8 @@ def _try_load_pointer_accel():
                 )
     logger.warning(
         "VisualServoHomer: no pointer-accel checkpoint at %s. The "
-        "homer will work but convergence is slower. Train your own "
-        "with scripts/collect_pointer_accel.sh + "
-        "scripts/train_pointer_accel.py — see README "
-        '"Calibrating the homer for your setup".',
-        ", ".join(str(c) for c in _POINTER_ACCEL_CHECKPOINT_CANDIDATES),
+        "homer will work but convergence is slower.",
+        ", ".join(str(c) for c in candidates),
     )
     return None
 
@@ -357,18 +415,28 @@ class VisualServoHomer:
         # Reuse the scene-map and target-keyword machinery from the
         # earlier homer — that part still works, the bug was elsewhere.
         self._helper = ClosedLoopHomer(session=session)
+        # Resolve the platform adapter from the session's AgentContext.
+        # The adapter declares which pointer_accel + longjump checkpoints
+        # to load — Linux libinput and macOS IOHID have different
+        # acceleration curves, so a checkpoint trained on one is wrong
+        # for the other (user-visible: cursor lands way off on macOS).
+        platform_adapter = None
+        ctx = getattr(self._session, "_ctx", None)
+        if ctx is not None:
+            platform_adapter = getattr(ctx, "platform", None)
+
         # Optional open-loop pointer-acceleration model. Trained
         # offline (scripts/train_pointer_accel.py); used only as the
         # first-iteration seed of the servo loop. Closed-loop still
         # owns iterations 2+, so absence is harmless.
-        self._pointer_accel = _try_load_pointer_accel()
+        self._pointer_accel = _try_load_pointer_accel(platform_adapter)
         # Optional long-jump model for the slam-to-target first move.
         # Trained on aggregated trajectory data
         # (scripts/build_longjump_dataset.py + train_longjump.py).
         # When present, home_to_pixel fires a chain of back-to-back
         # HID bursts based on this model's prediction before entering
         # the closed-loop servo, cutting typical click time ~2.5x.
-        self._longjump = _try_load_longjump()
+        self._longjump = _try_load_longjump_for(platform_adapter)
 
     async def run(self, target_desc: str, button: str = "left") -> ClickOutcome:
         try:
