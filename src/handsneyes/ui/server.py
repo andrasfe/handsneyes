@@ -70,6 +70,37 @@ class RunRequest(BaseModel):
     ml_adapter: str | None = None   # required when planner == "ml"
 
 
+class ScheduleCreateRequest(BaseModel):
+    """Recurring controller intent. Each tick fires the same RunRequest
+    shape; a tick where the runner is busy is silently skipped (a tune
+    or earlier scheduled job wins). Skipped ticks don't shift the cadence
+    — the next fire is still N minutes after the previous SCHEDULED tick,
+    not after the skipped one."""
+    intent: str = Field(min_length=1)
+    interval_minutes: float = Field(gt=0.0, le=24 * 60.0)
+    # Same options as RunRequest. Snapshot of the chat-form controls at
+    # the moment of creation; later changes to the UI don't affect
+    # already-scheduled jobs.
+    no_focus: bool = False
+    vault: str | None = None
+    password: str | None = None
+    vault_passphrase: str | None = None
+    skip_verify: bool = False
+    platform: str = "linux"
+    dry_run: bool = False
+    allow_llm_fallback: bool = True
+    planner: str = "auto"
+    ml_adapter: str | None = None
+    # When True, the first fire happens immediately on create (and the
+    # next is +interval_minutes from then). False = wait one full
+    # interval before the first fire.
+    fire_immediately: bool = False
+
+
+class ScheduleCancelRequest(BaseModel):
+    id: str = Field(min_length=1)
+
+
 class MouseClickAtRequest(BaseModel):
     x_pct: float = Field(ge=0.0, le=1.0)
     y_pct: float = Field(ge=0.0, le=1.0)
@@ -292,6 +323,11 @@ def create_app(
     # the caller needing to know either the passphrase or the value.
     # Lives in process memory only — gone on cc restart.
     app.state.vault_passphrase = None
+    # Recurring scheduler. {job_id -> dict of metadata + asyncio.Task}.
+    # In-memory only — jobs are forgotten on cc restart. The "Tune"
+    # use case for the scheduler is "fire this intent every N minutes
+    # while I work", which lives the same lifetime as a cc session.
+    app.state.schedules: dict[str, dict] = {}
 
     @app.on_event("startup")
     async def _on_startup() -> None:
@@ -2381,5 +2417,161 @@ def create_app(
         # bad install should count toward the next tune attempt.
         _homer_write_last_tune_ts(platform, _time_local.time())
         return JSONResponse({"ok": True, "platform": platform})
+
+    # ── scheduler (recurring controller intents) ──────────────────
+    # The chat-form's Send button fires a controller intent once. The
+    # scheduler fires the same intent on an interval — "every 5 min,
+    # check the build status" kind of thing. On a tick where the
+    # runner is busy (manual click in flight, tune retraining, etc.)
+    # the tick is silently skipped; the next fire is still one interval
+    # away from the previous SCHEDULED tick, not the skipped one, so
+    # cadence drift is bounded.
+    def _public_job(job: dict) -> dict:
+        return {
+            k: v for k, v in job.items()
+            if k not in ("task", "options")  # task isn't JSON; options have secrets
+        } | {
+            # Mirror non-secret options so the UI can show the dry-run /
+            # platform / no-focus a job was created with.
+            "options": {
+                k: v for k, v in job.get("options", {}).items()
+                if k not in ("password", "vault_passphrase")
+            },
+        }
+
+    async def _scheduler_loop(job_id: str) -> None:
+        import time as _time_local
+        job = app.state.schedules.get(job_id)
+        if job is None:
+            return
+        interval_s = job["interval_minutes"] * 60.0
+        # First-fire: either now (fire_immediately) or after one interval.
+        if job["fire_immediately"]:
+            await _scheduler_fire_once(job_id)
+        # Anchor to absolute monotonic schedule so that a skipped tick
+        # doesn't shift the cadence. The loop computes the next fire
+        # time from the original anchor, not from "now".
+        anchor = job["created_at"]
+        n = 1 if not job["fire_immediately"] else 1
+        while job_id in app.state.schedules:
+            target = anchor + n * interval_s
+            now = _time_local.time()
+            wait = target - now
+            if wait > 0:
+                try:
+                    await asyncio.sleep(wait)
+                except asyncio.CancelledError:
+                    return
+            if job_id not in app.state.schedules:
+                return
+            await _scheduler_fire_once(job_id)
+            n += 1
+
+    async def _scheduler_fire_once(job_id: str) -> None:
+        import time as _time_local
+        job = app.state.schedules.get(job_id)
+        if job is None:
+            return
+        if runner.is_busy():
+            job["skipped_count"] = job.get("skipped_count", 0) + 1
+            job["last_skipped_at"] = _time_local.time()
+            bus.publish(LogEvent(
+                ts=_time_local.time(), level="INFO", source="scheduler",
+                msg=f"[{job_id}] tick skipped — runner busy",
+                run_id=None,
+            ))
+            return
+        opts = job["options"]
+        try:
+            rec = await runner.start(
+                intent=job["intent"],
+                no_focus=opts.get("no_focus", False),
+                vault=opts.get("vault"),
+                password=opts.get("password"),
+                vault_passphrase=opts.get("vault_passphrase"),
+                skip_verify=opts.get("skip_verify", False),
+                platform=opts.get("platform", "linux"),
+                dry_run=opts.get("dry_run", False),
+                allow_llm_fallback=opts.get("allow_llm_fallback", True),
+                planner=opts.get("planner", "auto"),
+                ml_adapter=opts.get("ml_adapter"),
+            )
+            job["last_run_id"] = rec.run_id
+            job["last_fire_at"] = _time_local.time()
+            job["fire_count"] = job.get("fire_count", 0) + 1
+            bus.publish(LogEvent(
+                ts=_time_local.time(), level="INFO", source="scheduler",
+                msg=f"[{job_id}] fired run {rec.run_id} for intent {job['intent']!r}",
+                run_id=rec.run_id,
+            ))
+        except Exception as e:
+            job["last_error"] = str(e)
+            job["last_error_at"] = _time_local.time()
+            logger.exception("scheduler[%s] fire failed", job_id)
+
+    @app.post("/api/scheduler/create")
+    async def scheduler_create(req: ScheduleCreateRequest) -> JSONResponse:
+        import time as _time_local
+        import uuid as _uuid
+        job_id = _uuid.uuid4().hex[:8]
+        job = {
+            "id": job_id,
+            "intent": req.intent,
+            "interval_minutes": req.interval_minutes,
+            "created_at": _time_local.time(),
+            "fire_immediately": req.fire_immediately,
+            "fire_count": 0,
+            "skipped_count": 0,
+            "last_fire_at": None,
+            "last_skipped_at": None,
+            "last_run_id": None,
+            "last_error": None,
+            "options": {
+                "no_focus": req.no_focus,
+                "vault": req.vault,
+                "password": req.password,
+                "vault_passphrase": req.vault_passphrase,
+                "skip_verify": req.skip_verify,
+                "platform": req.platform,
+                "dry_run": req.dry_run,
+                "allow_llm_fallback": req.allow_llm_fallback,
+                "planner": req.planner,
+                "ml_adapter": req.ml_adapter,
+            },
+        }
+        app.state.schedules[job_id] = job
+        task = asyncio.create_task(
+            _scheduler_loop(job_id), name=f"schedule-{job_id}",
+        )
+        job["task"] = task
+        return JSONResponse({"ok": True, **_public_job(job)})
+
+    @app.get("/api/scheduler/list")
+    def scheduler_list() -> JSONResponse:
+        return JSONResponse({
+            "jobs": [_public_job(j) for j in app.state.schedules.values()],
+        })
+
+    @app.post("/api/scheduler/cancel")
+    async def scheduler_cancel(req: ScheduleCancelRequest) -> JSONResponse:
+        job = app.state.schedules.pop(req.id, None)
+        if job is None:
+            raise HTTPException(404, f"no such schedule {req.id!r}")
+        task = job.get("task")
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        return JSONResponse({"ok": True, "id": req.id})
+
+    @app.on_event("shutdown")
+    async def _scheduler_shutdown() -> None:
+        for job in list(app.state.schedules.values()):
+            t = job.get("task")
+            if t is not None:
+                t.cancel()
+        app.state.schedules.clear()
 
     return app

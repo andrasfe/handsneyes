@@ -132,6 +132,8 @@
           <option value="macos">macos</option>
         </select>
         <button id="btn-send" type="submit">Send</button>
+        <button id="btn-execute" type="button"
+                title="Run this intent once now, or schedule it to repeat every N minutes. Opens a dialog with options.">Execute…</button>
       </div>
     </form>
     </div>
@@ -223,6 +225,45 @@
       <div class="modal-footer">
         <button id="unlock-modal-cancel" type="button">Cancel</button>
         <button id="unlock-modal-submit" type="button" class="primary">Unlock</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Execute-controller modal: run once or schedule on an interval -->
+  <div id="sched-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-card">
+      <div class="modal-header">
+        <span>Execute controller intent</span>
+        <button id="sched-modal-close" type="button" title="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <label class="block">
+          <span class="label">Intent</span>
+          <textarea id="sched-intent" rows="3"
+            placeholder="e.g. open reddit.com&#10;take a screenshot&#10;check the build status"
+            autocomplete="off" spellcheck="false"></textarea>
+        </label>
+        <fieldset class="sched-mode">
+          <legend>Mode</legend>
+          <label><input type="radio" name="sched-mode" id="sched-mode-once" value="once" checked> Run once now</label>
+          <label><input type="radio" name="sched-mode" id="sched-mode-loop" value="loop"> Repeat every
+            <input type="number" id="sched-interval" min="0.1" step="0.1" value="5" style="width:5em;">
+            minutes
+          </label>
+        </fieldset>
+        <label class="opt">
+          <input type="checkbox" id="sched-fire-now"> Fire immediately on schedule (otherwise wait one full interval before first run)
+        </label>
+        <div class="sched-jobs-section">
+          <div class="label">Active schedules</div>
+          <ul id="sched-jobs-list" class="sched-jobs">
+            <li class="sched-jobs-empty">no active schedules</li>
+          </ul>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="sched-modal-cancel" type="button">Cancel</button>
+        <button id="sched-modal-submit" type="button" class="primary">Run</button>
       </div>
     </div>
   </div>

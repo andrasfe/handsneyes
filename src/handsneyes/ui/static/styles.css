@@ -639,6 +639,53 @@ body.col-resizing img { pointer-events: none; }
   flex-direction: column;
   gap: 8px;
 }
+#sched-modal .modal-card {
+  width: min(560px, 96vw);
+}
+#sched-modal .label {
+  font-size: 0.8em;
+  color: var(--fg-dim, #999);
+  display: block;
+  margin-bottom: 2px;
+}
+#sched-modal .block { display: block; }
+#sched-intent {
+  width: 100%;
+  resize: vertical;
+  background: var(--bg-elev-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-family: var(--mono);
+}
+.sched-mode {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.sched-mode legend { font-size: 0.85em; color: var(--fg-dim); padding: 0 4px; }
+.sched-mode label { display: block; margin: 4px 0; }
+.sched-jobs-section { margin-top: 4px; }
+.sched-jobs {
+  list-style: none; padding: 0; margin: 0;
+  max-height: 180px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.sched-jobs li {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 8px; gap: 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85em;
+}
+.sched-jobs li:last-child { border-bottom: none; }
+.sched-jobs-empty { color: var(--fg-dim, #999); justify-content: center !important; }
+.sched-job-meta { color: var(--fg-dim, #999); font-size: 0.9em; }
+.sched-job-cancel {
+  background: var(--bg-elev-2); border: 1px solid var(--border);
+  color: var(--fg); border-radius: 4px; padding: 2px 8px; cursor: pointer;
+}
+
 #exec-script-body {
   flex: 1;
   min-height: 0;

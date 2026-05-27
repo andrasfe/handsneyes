@@ -753,6 +753,166 @@ $btnExecScript.addEventListener("click", openExecModal);
 $execModalClose.addEventListener("click", closeExecModal);
 $execModalCancel.addEventListener("click", closeExecModal);
 
+// ── Execute (controller intent) modal ─────────────────────────────
+// "Run this intent once now" or "schedule every N minutes". Mirrors
+// the Send button's payload (dry-run / no-focus / platform snapshotted
+// from the chat-form controls). Active schedules are listed inline so
+// the operator can cancel from the same dialog.
+const $btnExecute = document.getElementById("btn-execute");
+const $schedModal = document.getElementById("sched-modal");
+const $schedIntent = document.getElementById("sched-intent");
+const $schedModeOnce = document.getElementById("sched-mode-once");
+const $schedModeLoop = document.getElementById("sched-mode-loop");
+const $schedInterval = document.getElementById("sched-interval");
+const $schedFireNow = document.getElementById("sched-fire-now");
+const $schedJobsList = document.getElementById("sched-jobs-list");
+const $schedModalClose = document.getElementById("sched-modal-close");
+const $schedModalCancel = document.getElementById("sched-modal-cancel");
+const $schedModalSubmit = document.getElementById("sched-modal-submit");
+
+function _schedBuildOptions() {
+  return {
+    no_focus: $optNoFocus.checked,
+    dry_run: $optDryRun.checked,
+    platform: $optPlatform.value,
+  };
+}
+
+async function refreshSchedList() {
+  if (!$schedJobsList) return;
+  try {
+    const r = await fetch("/api/scheduler/list");
+    if (!r.ok) return;
+    const j = await r.json();
+    const jobs = j.jobs || [];
+    if (jobs.length === 0) {
+      $schedJobsList.innerHTML =
+        '<li class="sched-jobs-empty">no active schedules</li>';
+      return;
+    }
+    $schedJobsList.innerHTML = "";
+    for (const job of jobs) {
+      const li = document.createElement("li");
+      const meta = document.createElement("div");
+      meta.innerHTML =
+        `<div><b>${escapeHtml(job.intent)}</b></div>` +
+        `<div class="sched-job-meta">every ${job.interval_minutes}m · ` +
+        `fired ${job.fire_count || 0}× · skipped ${job.skipped_count || 0}×` +
+        (job.last_error ? ` · last error: ${escapeHtml(job.last_error)}` : "") +
+        `</div>`;
+      const btn = document.createElement("button");
+      btn.className = "sched-job-cancel";
+      btn.textContent = "Cancel";
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          await fetch("/api/scheduler/cancel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: job.id }),
+          });
+        } catch (e) { /* ignore */ }
+        refreshSchedList();
+      });
+      li.appendChild(meta);
+      li.appendChild(btn);
+      $schedJobsList.appendChild(li);
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+
+function openSchedModal() {
+  // Pre-populate intent from the chat form so the operator doesn't
+  // have to retype it.
+  if (!$schedIntent.value && $chatInput.value) {
+    $schedIntent.value = $chatInput.value;
+  }
+  $schedModal.classList.remove("hidden");
+  $schedModal.setAttribute("aria-hidden", "false");
+  refreshSchedList();
+  setTimeout(() => $schedIntent.focus(), 30);
+}
+
+function closeSchedModal() {
+  $schedModal.classList.add("hidden");
+  $schedModal.setAttribute("aria-hidden", "true");
+}
+
+async function submitSchedModal() {
+  const intent = $schedIntent.value.trim();
+  if (!intent) {
+    $schedIntent.focus();
+    return;
+  }
+  const isLoop = $schedModeLoop.checked;
+  $schedModalSubmit.disabled = true;
+  try {
+    if (!isLoop) {
+      // One-shot: same as Send button. Bypass the scheduler entirely.
+      const body = { intent, ..._schedBuildOptions() };
+      const r = await fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const t = await r.text().catch(() => "");
+        window.alert(`run failed: ${r.status} ${t}`);
+        return;
+      }
+      const rec = await r.json();
+      appendChat({ runId: rec.run_id, intent: rec.intent, status: rec.status });
+      pollRunStatus(rec.run_id);
+      closeSchedModal();
+      return;
+    }
+    const interval_minutes = parseFloat($schedInterval.value);
+    if (!Number.isFinite(interval_minutes) || interval_minutes <= 0) {
+      $schedInterval.focus();
+      return;
+    }
+    const body = {
+      intent,
+      interval_minutes,
+      fire_immediately: $schedFireNow.checked,
+      ..._schedBuildOptions(),
+    };
+    const r = await fetch("/api/scheduler/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      window.alert(`schedule failed: ${r.status} ${t}`);
+      return;
+    }
+    appendSystemLog(
+      "INFO",
+      `scheduled "${intent}" every ${interval_minutes}m`,
+    );
+    // Refresh list so the operator can see the new job inline.
+    await refreshSchedList();
+    // Keep modal open for further scheduling; clear intent for next entry.
+    $schedIntent.value = "";
+  } catch (e) {
+    window.alert(`schedule error: ${e}`);
+  } finally {
+    $schedModalSubmit.disabled = false;
+  }
+}
+
+if ($btnExecute) $btnExecute.addEventListener("click", openSchedModal);
+if ($schedModalClose) $schedModalClose.addEventListener("click", closeSchedModal);
+if ($schedModalCancel) $schedModalCancel.addEventListener("click", closeSchedModal);
+if ($schedModalSubmit) $schedModalSubmit.addEventListener("click", submitSchedModal);
+
 // ── homer retrain (online training) ────────────────────────────
 const $btnRetrain = document.getElementById("btn-retrain");
 const $btnRollback = document.getElementById("btn-rollback");
