@@ -162,20 +162,33 @@ class StepRecord:
     note: str = ""
 
 
-def _persist_step(run_dir: Path, record: "StepRecord") -> None:
+def _persist_step(
+    run_dir: Path, record: "StepRecord", *, platform: str | None = None,
+) -> None:
     """Append one step record as a JSONL row to
     ``<run_dir>/history.jsonl``. Best-effort; errors are swallowed
     so a logging failure can't break a live homer run.
 
-    Each row is ``{ts, hid_dx, hid_dy, cursor_img: [x, y] | null,
+    Each row is ``{ts, platform, hid_dx, hid_dy, cursor_img: [x, y] | null,
     measured_dx_pct, measured_dy_pct, ratio_x, ratio_y, ...}`` — the
     fields a forward-model trainer needs to learn the OS-side
     pointer-acceleration curve from observed cursor deltas.
+
+    ``platform`` tags the row with the active target's adapter name
+    (e.g. "linux_gnome", "macos"). The dataset builder filters by
+    this so a per-platform retrain doesn't mix libinput-adaptive and
+    IOHID samples — those are fundamentally different curves and
+    mixing them produces a model worse than either pure subset.
+    Rows written before this field existed are absent it; the
+    builder treats untagged rows as "linux_gnome" for back-compat
+    (every existing row is from the Yaru/Ubuntu target).
     """
     try:
         row = asdict(record)
         # ``asdict`` turns tuples into lists, which is fine for JSON.
         row["ts"] = time.time()
+        if platform:
+            row["platform"] = platform
         with (run_dir / "history.jsonl").open(
             "a", encoding="utf-8",
         ) as f:
@@ -189,15 +202,19 @@ def _record_step(
     run_dir: Path,
     history: list["StepRecord"],
     record: "StepRecord",
+    *,
+    platform: str | None = None,
 ) -> None:
     """Append ``record`` to in-memory ``history`` *and* persist it.
 
     Used at every ``history.append(StepRecord(...))`` site so a
     single API change covers both the existing in-memory contract
-    and the new on-disk JSONL training log.
+    and the new on-disk JSONL training log. The optional ``platform``
+    tag flows through to the JSONL row so the dataset builder can
+    train per-OS corpora.
     """
     history.append(record)
-    _persist_step(run_dir, record)
+    _persist_step(run_dir, record, platform=platform)
 
 
 _POINTER_ACCEL_CHECKPOINT_CANDIDATES = (
@@ -424,6 +441,13 @@ class VisualServoHomer:
         ctx = getattr(self._session, "_ctx", None)
         if ctx is not None:
             platform_adapter = getattr(ctx, "platform", None)
+        # Platform name stamped onto every history.jsonl row so the
+        # per-OS retrain corpora stay separate. None for legacy callers
+        # that don't supply an adapter (tests / standalone scripts).
+        self._platform_name = (
+            getattr(platform_adapter, "name", None)
+            if platform_adapter is not None else None
+        )
 
         # Optional open-loop pointer-acceleration model. Trained
         # offline (scripts/train_pointer_accel.py); used only as the
@@ -673,7 +697,7 @@ class VisualServoHomer:
                             ratio_x=self._pct_per_hid_x,
                             ratio_y=self._pct_per_hid_y,
                             note="click_sent;manual_geometric_only",
-                        ))
+                        ), platform=self._platform_name)
                         print(
                             f"  ✓ Geometric confirm — clicked {button} "
                             f"at ({target_aim[0]:.2%},{target_aim[1]:.2%})"
@@ -732,7 +756,7 @@ class VisualServoHomer:
                         ratio_x=self._pct_per_hid_x,
                         ratio_y=self._pct_per_hid_y,
                         note=f"click_sent;nav_ok={final_ok};{final_reason[:80]}",
-                    ))
+                    ), platform=self._platform_name)
                     if final_ok:
                         print(
                             f"  ✓ Click landed on target — navigation "
@@ -938,7 +962,7 @@ class VisualServoHomer:
                 ratio_y=self._pct_per_hid_y,
                 note=("hsv_measured" if new_hit is not None
                       else "openloop_fallback"),
-            ))
+            ), platform=self._platform_name)
             last_proof = self._dump_step_color(
                 run_dir, step, post_color, cursor_img, target_img,
                 history[-1],
@@ -1329,7 +1353,7 @@ class VisualServoHomer:
             ratio_x=self._pct_per_hid_x,
             ratio_y=self._pct_per_hid_y,
             note="longjump_chain",
-        ))
+        ), platform=self._platform_name)
         logger.info(
             "Long-jump landed: cursor=(%.2f%%,%.2f%%) residual=%.2f%% "
             "(predicted=(%.2f%%,%.2f%%))",

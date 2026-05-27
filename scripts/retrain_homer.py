@@ -267,6 +267,15 @@ def main() -> int:
              "the training corpus. Off by default — those rows produced "
              "the v5/v6 retrain regressions in real use.",
     )
+    ap.add_argument(
+        "--platform", type=str, default=None,
+        help="Restrict training data + warm-start checkpoint to this "
+             "platform (e.g. 'linux_gnome', 'macos'). Different OSes "
+             "have different acceleration curves; mixing data produces "
+             "a model worse than either pure subset. When set, the "
+             "builder receives --platform <name> and the warm-start "
+             "loads platforms/<name>/models/pointer_accel/.",
+    )
     args = ap.parse_args()
 
     cwd = Path.cwd()
@@ -274,6 +283,9 @@ def main() -> int:
 
     summary: dict = {"results": []}
 
+    # Default platform = linux_gnome to preserve historical behaviour
+    # when callers don't pass --platform (every legacy row is Yaru).
+    platform = args.platform or "linux_gnome"
     if args.only in ("pointer_accel", "both"):
         # Exclude the explore_v2_* active-learning sessions by default:
         # they produced the v5/v6 corpora that regressed in real use.
@@ -283,15 +295,21 @@ def main() -> int:
             build_cmd.append("--hsv-only")
         if not args.include_explore_v2:
             build_cmd.extend(["--exclude-pattern", "explore_v2*"])
-        # Warm-start from the currently-shipped checkpoint by default
+        # Filter the corpus to just this platform's rows. Critical
+        # when retraining a non-linux model on a host that also has
+        # Ubuntu samples sitting on disk.
+        build_cmd.extend(["--platform", platform])
+        # Warm-start from the platform's shipped checkpoint by default
         # so the retrain fine-tunes the proven model on new data, not
         # trains a fresh one from random init. Pass --from-scratch
-        # to override (e.g. when changing architecture).
+        # to override (e.g. when changing architecture). The first
+        # tune for a new platform has nothing to warm-start from →
+        # falls through to from-scratch automatically.
         train_cmd_prefix = [py, "scripts/train_pointer_accel.py"]
         shipped = Path(
-            "src/handsneyes/platforms/linux_gnome/models/pointer_accel"
+            f"src/handsneyes/platforms/{platform}/models/pointer_accel"
         )
-        if not args.from_scratch and shipped.exists():
+        if not args.from_scratch and (shipped / "weights.npz").exists():
             train_cmd_prefix.extend([
                 "--init-from", str(shipped),
                 # Lower LR for fine-tuning; the default 1e-2 would erase

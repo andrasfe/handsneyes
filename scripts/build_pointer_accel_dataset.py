@@ -132,6 +132,16 @@ def main() -> int:
              "against each history.jsonl's parent dir name + the "
              "session dir name (e.g. 'explore_v2*'). Repeatable.",
     )
+    ap.add_argument(
+        "--platform", type=str, default=None,
+        help="Keep only rows tagged with this platform (e.g. "
+             "'linux_gnome', 'macos'). Untagged rows (written before "
+             "platform tagging existed) are treated as 'linux_gnome' "
+             "since every legacy row is from the Yaru target. Set "
+             "empty / unset to include all platforms (legacy behaviour, "
+             "DANGEROUS when training a non-linux model since IOHID "
+             "and libinput curves don't mix).",
+    )
     args = ap.parse_args()
     since_ts = None
     if args.since:
@@ -166,6 +176,7 @@ def main() -> int:
     n_dropped_age = 0
     n_dropped_canary = 0
     n_dropped_pattern = 0
+    n_dropped_platform = 0
     for hist_path in _iter_history_files(args.runs_root):
         if since_ts is not None:
             try:
@@ -208,6 +219,13 @@ def main() -> int:
                     if args.hsv_only and r.get("note") != "hsv_measured":
                         n_dropped_note += 1
                         continue
+                    if args.platform:
+                        # Untagged rows are legacy linux_gnome.
+                        row_platform = step.get("platform", "linux_gnome")
+                        if row_platform != args.platform:
+                            n_dropped_platform += 1
+                            continue
+                        r["platform"] = row_platform
                     rows.append(r)
         except OSError:
             continue
@@ -219,6 +237,9 @@ def main() -> int:
         print(f"dropped {n_dropped_canary} canary trajectory(s)")
     if n_dropped_pattern:
         print(f"dropped {n_dropped_pattern} excluded-pattern file(s)")
+    if args.platform:
+        print(f"kept rows for platform={args.platform!r}; "
+              f"dropped {n_dropped_platform} row(s) from other platforms")
 
     print(
         f"scanned {n_files} history.jsonl file(s), {n_lines} step "

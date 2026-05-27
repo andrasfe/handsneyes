@@ -225,6 +225,7 @@ def create_app(
     frame_store: FrameStore | None = None,
     bus: LogBus | None = None,
     settings: Any = None,
+    active_platform: str = "linux_gnome",
 ) -> FastAPI:
     """Build the FastAPI app.
 
@@ -242,6 +243,12 @@ def create_app(
     app.state.store = store
     app.state.bus = bus
     app.state.runner = runner
+    # The active target's platform name (e.g. "linux_gnome", "macos").
+    # Threaded through tune / rollback / training-state so each OS
+    # gets its own model file, Previous slot, and sample counter —
+    # macOS clicks don't poison the Ubuntu retrain corpus and vice
+    # versa. Set from the CLI's chosen target in handsneyes/cli.py.
+    app.state.active_platform = active_platform
 
     # Serializes manual-control webcam captures so a click and a
     # background follow-up snapshot don't fight over the device.
@@ -2106,48 +2113,76 @@ def create_app(
     # Tune: train candidate -> rotate (live -> previous, candidate -> live).
     # Rollback: swap live <-> previous (so a second rollback puts it back).
     from pathlib import Path as _PathHomer
-    _HOMER_LIVE = _PathHomer(
-        "src/handsneyes/platforms/linux_gnome/models/pointer_accel"
-    )
-    _HOMER_PREV = _PathHomer.home() / (
-        ".local/share/handsneyes/model_slots/previous/pointer_accel"
-    )
-    _HOMER_LAST_TUNE_TS = _PathHomer.home() / (
-        ".config/handsneyes/last_tune_ts"
-    )
     _HOMER_RUNS_ROOT = _PathHomer.home() / ".local/share/handsneyes/runs"
 
-    def _homer_read_last_tune_ts() -> float:
+    def _homer_live_for(platform: str) -> _PathHomer:
+        # The installed model for a given platform. Each platform's
+        # adapter package has its own models/ directory — Ubuntu's stays
+        # untouched when a macOS tune ships, and vice versa.
+        return _PathHomer(
+            f"src/handsneyes/platforms/{platform}/models/pointer_accel"
+        )
+
+    def _homer_prev_for(platform: str) -> _PathHomer:
+        # Per-platform Previous slot. Outside the git tree so model
+        # state doesn't churn tracked files.
+        return _PathHomer.home() / (
+            f".local/share/handsneyes/model_slots/{platform}/previous/pointer_accel"
+        )
+
+    def _homer_last_tune_ts_path(platform: str) -> _PathHomer:
+        return _PathHomer.home() / (
+            f".config/handsneyes/last_tune_ts.{platform}"
+        )
+
+    def _homer_read_last_tune_ts(platform: str) -> float:
         try:
-            return float(_HOMER_LAST_TUNE_TS.read_text().strip())
+            return float(_homer_last_tune_ts_path(platform).read_text().strip())
         except Exception:
             return 0.0
 
-    def _homer_write_last_tune_ts(ts: float) -> None:
+    def _homer_write_last_tune_ts(platform: str, ts: float) -> None:
         try:
-            _HOMER_LAST_TUNE_TS.parent.mkdir(
-                parents=True, exist_ok=True, mode=0o700,
-            )
-            _HOMER_LAST_TUNE_TS.write_text(f"{ts}\n")
+            p = _homer_last_tune_ts_path(platform)
+            p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            p.write_text(f"{ts}\n")
         except Exception:
             logger.exception("could not persist last_tune_ts")
 
-    def _homer_count_trajectories_since(ts: float) -> int:
-        """Count homer history.jsonl files newer than ts.
-
-        Survives cc restart: the count is derived from disk, not from
-        an in-process counter. So 'samples accumulated since last tune'
-        is correct even after cc bouncing.
-        """
+    def _homer_count_trajectories_since(
+        ts: float, platform: str,
+    ) -> int:
+        """Count homer history.jsonl files newer than ts whose rows are
+        tagged with this platform (or untagged — those are legacy
+        linux_gnome). Per-platform counter so the macOS Tune button
+        shows only macOS clicks and vice versa."""
         if not _HOMER_RUNS_ROOT.exists():
             return 0
         n = 0
         for hist in _HOMER_RUNS_ROOT.glob("**/homer/*/history.jsonl"):
             try:
-                if hist.stat().st_mtime >= ts:
-                    n += 1
+                if hist.stat().st_mtime < ts:
+                    continue
             except OSError:
-                pass
+                continue
+            # Sample the first line to read its platform tag (cheap;
+            # a whole-trajectory is one platform).
+            tagged_platform: str | None = None
+            try:
+                with hist.open("r", encoding="utf-8") as f:
+                    first = f.readline().strip()
+                    if first:
+                        try:
+                            tagged_platform = (
+                                json.loads(first).get("platform")
+                            )
+                        except json.JSONDecodeError:
+                            pass
+            except OSError:
+                continue
+            row_platform = tagged_platform or "linux_gnome"
+            if row_platform == platform:
+                n += 1
         return n
 
     def _homer_copy_dir_contents(src: _PathHomer, dst: _PathHomer) -> None:
@@ -2160,52 +2195,61 @@ def create_app(
             if f.is_file():
                 _shutil.copy2(f, dst / f.name)
 
-    def _homer_install_with_rotation(candidate: _PathHomer) -> None:
-        """Backup live -> previous, then install candidate -> live."""
+    def _homer_install_with_rotation(
+        candidate: _PathHomer, platform: str,
+    ) -> None:
+        """Backup live -> previous, then install candidate -> live —
+        all scoped to the given platform so other platforms' models
+        are untouched."""
         import shutil as _shutil
-        if _HOMER_LIVE.exists():
-            _HOMER_PREV.parent.mkdir(parents=True, exist_ok=True)
-            if _HOMER_PREV.exists():
-                _shutil.rmtree(_HOMER_PREV)
-            _shutil.copytree(_HOMER_LIVE, _HOMER_PREV)
-        _HOMER_LIVE.mkdir(parents=True, exist_ok=True)
-        _homer_copy_dir_contents(candidate, _HOMER_LIVE)
+        live = _homer_live_for(platform)
+        prev = _homer_prev_for(platform)
+        if live.exists() and any(live.iterdir()):
+            prev.parent.mkdir(parents=True, exist_ok=True)
+            if prev.exists():
+                _shutil.rmtree(prev)
+            _shutil.copytree(live, prev)
+        live.mkdir(parents=True, exist_ok=True)
+        _homer_copy_dir_contents(candidate, live)
 
-    def _homer_swap_live_and_previous() -> bool:
-        """Swap Live <-> Previous. Returns False if no previous slot.
+    def _homer_swap_live_and_previous(platform: str) -> bool:
+        """Swap Live <-> Previous for a single platform. Returns False
+        if no previous slot for that platform.
 
         Implementation note: Live is a git-tracked dir; we mutate
         its files in place rather than replacing the directory itself,
         so other tooling watching that path keeps working."""
         import shutil as _shutil
-        if not _HOMER_PREV.exists():
+        live = _homer_live_for(platform)
+        prev = _homer_prev_for(platform)
+        if not prev.exists():
             return False
-        if not _HOMER_LIVE.exists():
-            _HOMER_LIVE.mkdir(parents=True, exist_ok=True)
-        tmp = _HOMER_PREV.parent / "_swap_tmp"
+        if not live.exists():
+            live.mkdir(parents=True, exist_ok=True)
+        tmp = prev.parent / "_swap_tmp"
         if tmp.exists():
             _shutil.rmtree(tmp)
-        _shutil.copytree(_HOMER_LIVE, tmp)
-        # Replace live with previous
-        for f in list(_HOMER_LIVE.iterdir()):
+        _shutil.copytree(live, tmp)
+        for f in list(live.iterdir()):
             if f.is_file():
                 f.unlink()
-        _homer_copy_dir_contents(_HOMER_PREV, _HOMER_LIVE)
-        # Replace previous with the old live
-        _shutil.rmtree(_HOMER_PREV)
-        _shutil.copytree(tmp, _HOMER_PREV)
+        _homer_copy_dir_contents(prev, live)
+        _shutil.rmtree(prev)
+        _shutil.copytree(tmp, prev)
         _shutil.rmtree(tmp)
         return True
 
     @app.get("/api/homer/training-state")
     def homer_training_state() -> JSONResponse:
-        last_tune_ts = _homer_read_last_tune_ts()
+        platform = app.state.active_platform
+        last_tune_ts = _homer_read_last_tune_ts(platform)
         return JSONResponse({
+            "platform": platform,
             "n_trajectories_since_train": (
-                _homer_count_trajectories_since(last_tune_ts)
+                _homer_count_trajectories_since(last_tune_ts, platform)
             ),
             "last_tune_ts": last_tune_ts,
-            "has_previous": _HOMER_PREV.exists(),
+            "has_previous": _homer_prev_for(platform).exists(),
             "is_retraining": app.state.is_retraining,
             "last_retrain": app.state.last_retrain,
         })
@@ -2227,6 +2271,7 @@ def create_app(
         if app.state.is_retraining:
             raise HTTPException(409, "retrain already in progress")
         app.state.is_retraining = True
+        platform = app.state.active_platform
         async def _run():
             import sys as _sys
             from pathlib import Path as _Path
@@ -2234,9 +2279,13 @@ def create_app(
             installed = False
             install_error: str | None = None
             try:
+                # Pass --platform so retrain_homer.py builds a corpus
+                # of just this OS's samples (different acceleration
+                # curves between linux_gnome and macos must not mix).
                 proc = await asyncio.create_subprocess_exec(
                     _sys.executable, "scripts/retrain_homer.py",
                     "--summary-out", str(summary_path),
+                    "--platform", platform,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                 )
@@ -2279,14 +2328,15 @@ def create_app(
                         candidate = d
                 if rc == 0 and candidate is not None:
                     try:
-                        _homer_install_with_rotation(candidate)
-                        _homer_write_last_tune_ts(_time_local.time())
+                        _homer_install_with_rotation(candidate, platform)
+                        _homer_write_last_tune_ts(platform, _time_local.time())
                         installed = True
                     except Exception as e:
                         install_error = f"slot rotation failed: {e}"
                         logger.exception("slot rotation failed")
                 app.state.last_retrain = {
                     "rc": rc, "verdict": verdict,
+                    "platform": platform,
                     "installed": installed,
                     "install_error": install_error,
                     "candidate": candidate.name if candidate else None,
@@ -2316,16 +2366,20 @@ def create_app(
 
     @app.post("/api/homer/rollback")
     def homer_rollback() -> JSONResponse:
-        """Swap Live <-> Previous slots. Idempotent under the same
-        previous: clicking Rollback twice puts you back where you
-        started. Returns 404 if there is no Previous slot."""
+        """Swap Live <-> Previous slots for the active platform.
+        Idempotent under the same previous: clicking Rollback twice
+        puts you back where you started. Returns 404 if there is no
+        Previous slot for this platform."""
         import time as _time_local
-        if not _homer_swap_live_and_previous():
-            raise HTTPException(404, "no previous slot to roll back to")
+        platform = app.state.active_platform
+        if not _homer_swap_live_and_previous(platform):
+            raise HTTPException(
+                404, f"no previous slot to roll back to for {platform}",
+            )
         # Persist a fresh tune timestamp so the trajectory counter
         # resets at the rollback point — clicks accumulated since the
         # bad install should count toward the next tune attempt.
-        _homer_write_last_tune_ts(_time_local.time())
-        return JSONResponse({"ok": True})
+        _homer_write_last_tune_ts(platform, _time_local.time())
+        return JSONResponse({"ok": True, "platform": platform})
 
     return app

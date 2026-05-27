@@ -400,6 +400,7 @@ def _cmd_commandcenter(args: argparse.Namespace) -> int:
     app = create_app(
         context_factory, frame_store=store, bus=bus,
         settings=_Settings(),
+        active_platform=target.platform,
     )
 
     print(
