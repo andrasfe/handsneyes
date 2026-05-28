@@ -46,6 +46,13 @@ class Target:
     transport: Transport = "bt"
     screen_size: tuple[int, int] = (1920, 1080)
     description: str = ""
+    # "webcam" (default): cv2.VideoCapture(camera_index) — for a
+    # remote machine the dev mac watches.
+    # "screen": grab the local display directly via Pillow's
+    #   ImageGrab. Used when the target IS the same machine running
+    #   the cc (self-driving setup). camera_index is then the
+    #   display index (0 = primary).
+    capture_source: str = "webcam"
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -54,6 +61,11 @@ class Target:
             raise ValueError(
                 f"Target {self.name!r}: transport must be 'bt' or "
                 f"'usb', got {self.transport!r}"
+            )
+        if self.capture_source not in ("webcam", "screen"):
+            raise ValueError(
+                f"Target {self.name!r}: capture_source must be "
+                f"'webcam' or 'screen', got {self.capture_source!r}"
             )
 
 
@@ -115,6 +127,7 @@ class TargetRegistry:
                 transport=str(row.get("transport", "bt")),  # type: ignore[arg-type]
                 screen_size=(int(screen[0]), int(screen[1])),
                 description=str(row.get("description", "")),
+                capture_source=str(row.get("capture_source", "webcam")),
             )
         return cls(targets=targets, source=path)
 

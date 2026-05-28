@@ -15,6 +15,41 @@ const $chatInput = document.getElementById("chat-input");
 const $btnSend = document.getElementById("btn-send");
 const $optDryRun = document.getElementById("opt-dry-run");
 const $optNoFocus = document.getElementById("opt-no-focus");
+const $optSelfCapture = document.getElementById("opt-self-capture");
+
+// Self-capture toggle: tells the cc to grab the local display
+// instead of the configured webcam on the next run. State is
+// authoritative on the server; we sync the checkbox to it on load
+// and POST on change.
+(function _wireSelfCapture() {
+  if (!$optSelfCapture) return;
+  fetch("/api/capture-source")
+    .then(r => r.ok ? r.json() : null)
+    .then(j => { if (j) $optSelfCapture.checked = !!j.self_capture; })
+    .catch(() => {});
+  $optSelfCapture.addEventListener("change", async () => {
+    const want = $optSelfCapture.checked;
+    try {
+      const r = await fetch("/api/capture-source", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ self_capture: want }),
+      });
+      if (!r.ok) {
+        $optSelfCapture.checked = !want;  // revert
+        appendSystemLog("ERROR", `capture-source toggle failed: ${r.status}`);
+      } else {
+        appendSystemLog(
+          "INFO",
+          `capture source → ${want ? "self (local display)" : "target default (webcam)"}`,
+        );
+      }
+    } catch (e) {
+      $optSelfCapture.checked = !want;
+      appendSystemLog("ERROR", `capture-source toggle error: ${e}`);
+    }
+  });
+})();
 const $optPlatform = document.getElementById("opt-platform");
 const $optVault = document.getElementById("opt-vault");
 const $btnLock = document.getElementById("btn-lock");

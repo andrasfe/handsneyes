@@ -126,6 +126,10 @@
       <div class="chat-row">
         <label class="opt"><input type="checkbox" id="opt-dry-run"/> dry-run</label>
         <label class="opt"><input type="checkbox" id="opt-no-focus"/> no-focus</label>
+        <label class="opt"
+               title="Use this Mac's own display as the capture source instead of the configured webcam. Takes effect on the next click_at / run. Useful when handsneyes is driving the same machine it's running on.">
+          <input type="checkbox" id="opt-self-capture"/> self-capture
+        </label>
         <select id="opt-platform"
                 title="Target OS. When 'macos', the keyboard passthrough auto-remaps Ctrl-letter shortcuts to Cmd-letter (so Ctrl-A becomes Cmd-A on the host for select-all).">
           <option value="linux" selected>linux</option>

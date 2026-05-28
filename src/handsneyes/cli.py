@@ -376,8 +376,15 @@ def _cmd_commandcenter(args: argparse.Namespace) -> int:
 
     store = FrameStore(watch_dir=watch_dir, max_frames=args.max_frames)
     bus = LogBus()
+    # Shared runtime state — flipped by /api/capture-source from the
+    # UI, read by the context factory on each new run. Lets the
+    # "self capture" checkbox take effect without a cc restart.
+    runtime_state: dict = {
+        "use_self_capture": target.capture_source == "screen",
+    }
     context_factory = make_target_context_factory(
         target, adapter, base_dir=watch_dir, bus=bus,
+        runtime_state=runtime_state,
     )
 
     # Settings-shape shim for the manual snapshot + commander_cfg paths
@@ -401,6 +408,7 @@ def _cmd_commandcenter(args: argparse.Namespace) -> int:
         context_factory, frame_store=store, bus=bus,
         settings=_Settings(),
         active_platform=target.platform,
+        runtime_state=runtime_state,
     )
 
     print(

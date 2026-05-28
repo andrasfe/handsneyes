@@ -42,6 +42,7 @@ def make_target_context_factory(
     bus=None,
     vision_base_url: str = "http://localhost:1234/v1",
     vision_model: str = "nvidia/nemotron-3-nano-omni",
+    runtime_state: dict | None = None,
 ) -> Callable[[], Awaitable[tuple[Any, Any, Any, Any]]]:
     """Build a runner-compatible factory from a :class:`Target` + adapter.
 
@@ -49,13 +50,22 @@ def make_target_context_factory(
     ``make_default_context_factory`` (kept below for back-compat with
     the verbatim cc port) consumes a terminaleyes-style settings
     object. Use this one in new code.
+
+    ``runtime_state`` is a dict shared with create_app for cross-cutting
+    toggles (e.g. ``use_self_capture``) that the UI can flip without
+    a cc restart. The factory consults it at each invocation, so a
+    checkbox flip takes effect on the next /api/run or /api/mouse/*.
     """
     base_dir = Path(base_dir).expanduser().resolve()
+    # Default to an empty dict so call sites that don't supply one
+    # still work. Falsy values mean "use the target's configured source".
+    runtime_state = runtime_state if runtime_state is not None else {}
 
     async def factory():
         from openai import AsyncOpenAI
 
         from handsneyes.core.agents.context import AgentContext
+        from handsneyes.core.capture.screen import ScreenCapture
         from handsneyes.core.capture.webcam import WebcamCapture
         from handsneyes.io.keyboard import PlatformKeyboard
         from handsneyes.io.keyboard.backends.http import HttpKeyboardOutput
@@ -95,21 +105,35 @@ def make_target_context_factory(
             logger.warning("mouse connect failed (%s) — running offline", e)
 
         capture = None
+        # UI override beats targets.toml: if the operator toggled
+        # "self capture" in the cc, force ScreenCapture regardless of
+        # what the active target says.
+        effective_source = target.capture_source
+        if runtime_state.get("use_self_capture"):
+            effective_source = "screen"
         try:
             import asyncio as _asyncio
-            capture = WebcamCapture(device_index=target.camera_index)
+            if effective_source == "screen":
+                # Self-driving setup: cc + target are the same box.
+                # Pillow grabs the local display directly — no webcam,
+                # no calibration. camera_index doubles as the display
+                # index here (0 = primary).
+                capture = ScreenCapture(display_index=target.camera_index)
+            else:
+                capture = WebcamCapture(device_index=target.camera_index)
             # Hard cap: cv2.VideoCapture(N) on macOS can block forever
             # when N points at a busy / phantom device. 10s is generous
             # for a real USB webcam (the warmup loop also runs here).
+            # ScreenCapture.open() is a single grab — well under 10s.
             await _asyncio.wait_for(capture.open(), timeout=10.0)
         except _asyncio.TimeoutError:
             logger.warning(
-                "webcam open exceeded 10s on device %d — running blind",
-                target.camera_index,
+                "capture open exceeded 10s (source=%s, index=%d) — running blind",
+                effective_source, target.camera_index,
             )
             capture = None
         except Exception as e:
-            logger.warning("webcam open failed (%s) — running blind", e)
+            logger.warning("capture open failed (%s) — running blind", e)
             capture = None
 
         client = AsyncOpenAI(

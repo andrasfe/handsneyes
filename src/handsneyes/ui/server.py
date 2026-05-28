@@ -257,6 +257,7 @@ def create_app(
     bus: LogBus | None = None,
     settings: Any = None,
     active_platform: str = "linux_gnome",
+    runtime_state: dict | None = None,
 ) -> FastAPI:
     """Build the FastAPI app.
 
@@ -280,6 +281,10 @@ def create_app(
     # macOS clicks don't poison the Ubuntu retrain corpus and vice
     # versa. Set from the CLI's chosen target in handsneyes/cli.py.
     app.state.active_platform = active_platform
+    # Cross-cutting runtime toggles the UI can flip without a cc
+    # restart. Shared by reference with make_target_context_factory
+    # so the factory sees updates immediately on the next /api/run.
+    app.state.runtime_state = runtime_state if runtime_state is not None else {}
 
     # Serializes manual-control webcam captures so a click and a
     # background follow-up snapshot don't fight over the device.
@@ -2417,6 +2422,32 @@ def create_app(
         # bad install should count toward the next tune attempt.
         _homer_write_last_tune_ts(platform, _time_local.time())
         return JSONResponse({"ok": True, "platform": platform})
+
+    # ── capture-source toggle (self capture) ──────────────────────
+    # Lets the UI flip between webcam (default) and "grab local
+    # display" without editing targets.toml + restarting cc. Takes
+    # effect on the NEXT /api/run or /api/mouse/click_at — already-
+    # running runs aren't interrupted.
+
+    class CaptureSourceRequest(BaseModel):
+        self_capture: bool
+
+    @app.get("/api/capture-source")
+    def capture_source_state() -> JSONResponse:
+        return JSONResponse({
+            "self_capture": bool(
+                app.state.runtime_state.get("use_self_capture", False)
+            ),
+        })
+
+    @app.post("/api/capture-source")
+    def capture_source_set(req: CaptureSourceRequest) -> JSONResponse:
+        app.state.runtime_state["use_self_capture"] = bool(req.self_capture)
+        logger.info(
+            "capture source override → %s",
+            "screen" if req.self_capture else "(target default)",
+        )
+        return JSONResponse({"ok": True, "self_capture": req.self_capture})
 
     # ── scheduler (recurring controller intents) ──────────────────
     # The chat-form's Send button fires a controller intent once. The
