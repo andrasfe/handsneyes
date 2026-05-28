@@ -12,9 +12,9 @@
     "hid_dy_norm"
   ],
   "augmented": true,
-  "train_rows": 10632,
-  "val_rows": 130,
+  "train_rows": 17540,
+  "val_rows": 392,
   "platform": "macos-iohid",
-  "version": "v5",
-  "notes": "trained on 2658 macos rows. Fixed collector anchor-walk so samples land at all screen positions (v4 had 95% of cursor_x in [0, 0.4]; v5 has meaningful representation through cursor_x=1.0). Canary 8/8 in mean 3.9 steps @ tol=0.01."
+  "version": "v7",
+  "notes": "4385 train rows from full-screen anchor walks at --settle-ms 200. best_val_mse=0.012 @ epoch 391 (8x better than v5). Canary tol=0.005: 7/8 vs v5's 6/8."
 }
