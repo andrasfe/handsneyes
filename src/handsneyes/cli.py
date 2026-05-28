@@ -117,6 +117,13 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     cc.add_argument("--max-frames", type=int, default=500)
+    cc.add_argument(
+        "--target", default=None,
+        help=(
+            "Name of the target from config/targets.toml. "
+            "Default: first non-headless entry."
+        ),
+    )
 
     # ── version (also via --version) ──────────────────────────────
     sub.add_parser("version", help="Print handsneyes version.")
@@ -348,14 +355,23 @@ def _cmd_commandcenter(args: argparse.Namespace) -> int:
     from handsneyes.ui.server import create_app
 
     registry = TargetRegistry.load_default()
-    # Pick the first non-headless target if one exists; otherwise
-    # headless. For multi-target switching we'll need a UI control;
-    # Phase C ships single-target.
     names = registry.names()
-    chosen = next(
-        (n for n in names if registry.get(n).platform != "headless"),
-        names[0] if names else "headless",
-    )
+    if getattr(args, "target", None):
+        if args.target not in registry.targets:
+            print(
+                f"error: target {args.target!r} not in targets.toml "
+                f"(have: {', '.join(names) or '(none)'})",
+                file=sys.stderr,
+            )
+            return 2
+        chosen = args.target
+    else:
+        # Pick the first non-headless target if one exists; otherwise
+        # headless.
+        chosen = next(
+            (n for n in names if registry.get(n).platform != "headless"),
+            names[0] if names else "headless",
+        )
     target = registry.get(chosen)
     try:
         adapter = load_adapter(target.platform)

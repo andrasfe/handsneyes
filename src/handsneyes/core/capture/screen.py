@@ -54,6 +54,22 @@ from handsneyes.core.capture.base import (
 logger = logging.getLogger(__name__)
 
 
+def _looks_like_test_pattern(img: np.ndarray) -> bool:
+    """Detect macOS' "no Screen Recording permission" placeholder.
+
+    The placeholder is SMPTE-style vertical color bars; every column
+    is a constant intensity, so the per-pixel vertical gradient is
+    exactly 0. Real desktop captures average ~10 even on minimal
+    desktops (icons, menu bar, window edges). Threshold of 1.5 has
+    ample margin.
+    """
+    if img is None or img.size == 0:
+        return False
+    gray = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    vert = float(np.abs(np.diff(gray.astype(np.int16), axis=0)).mean())
+    return vert < 1.5
+
+
 class ScreenCapture(CaptureSource):
     """Captures frames of the local machine's display.
 
@@ -103,6 +119,14 @@ class ScreenCapture(CaptureSource):
             raise CaptureError(
                 "ScreenCapture: probe grab returned empty frame "
                 f"(display_index={self._display_index})",
+            )
+        if _looks_like_test_pattern(frame):
+            raise CaptureError(
+                "ScreenCapture got the macOS Screen Recording "
+                "placeholder (SMPTE-style color bars). Open "
+                "System Settings → Privacy & Security → Screen "
+                "Recording and add the Python interpreter / terminal "
+                "that launched handsneyes, then restart the cc.",
             )
         self._actual_h, self._actual_w = frame.shape[:2]
         self._is_open = True
