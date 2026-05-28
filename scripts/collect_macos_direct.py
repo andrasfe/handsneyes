@@ -62,6 +62,11 @@ def main() -> int:
     )
     ap.add_argument("--settle-ms", type=int, default=120)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--band", choices=["all", "right", "left", "center"], default="all",
+        help="Restrict anchor set. 'right' = cursor_x in [0.65, 0.95], "
+             "used to close the v3 gap at large x. 'all' = full screen.",
+    )
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
@@ -71,10 +76,11 @@ def main() -> int:
     # Carve out a session dir. Match the homer's layout so existing
     # tools find it.
     ts = time.strftime("%Y-%m-%d_%H-%M-%S")
-    session = args.output_dir / ts / "homer" / f"macos_direct_{ts}"
-    session.mkdir(parents=True, exist_ok=True)
-    out = session / "history.jsonl"
-    print(f"writing → {out}")
+    # One trajectory per anchor so the 80/10/10 split balances. A
+    # single mega-jsonl with all anchors makes the per-trajectory
+    # split assign 80% of rows to one bucket.
+    session_root = args.output_dir / ts
+    print(f"writing trajectories under → {session_root}")
 
     # HID amplitude grid. Spread heavily across the full range so
     # the model sees enough large-amplitude examples to extrapolate
@@ -99,11 +105,34 @@ def main() -> int:
     # the model has data for cursor positions at the edges (v1
     # consistently stuck around x=0.6 for x=0.80 targets — too few
     # right-half samples).
-    anchors = [
-        (0.10, 0.25), (0.30, 0.25), (0.50, 0.25), (0.70, 0.25), (0.90, 0.25),
-        (0.10, 0.50), (0.30, 0.50), (0.50, 0.50), (0.70, 0.50), (0.90, 0.50),
-        (0.10, 0.70), (0.30, 0.70), (0.50, 0.70), (0.70, 0.70), (0.90, 0.70),
-    ]
+    if args.band == "right":
+        # Dense right-half coverage to close the v3 (0.80, 0.50) gap.
+        anchors = [
+            (0.65, 0.25), (0.75, 0.25), (0.85, 0.25), (0.95, 0.25),
+            (0.65, 0.40), (0.75, 0.40), (0.85, 0.40), (0.95, 0.40),
+            (0.65, 0.50), (0.75, 0.50), (0.85, 0.50), (0.95, 0.50),
+            (0.65, 0.60), (0.75, 0.60), (0.85, 0.60), (0.95, 0.60),
+            (0.65, 0.70), (0.75, 0.70), (0.85, 0.70), (0.95, 0.70),
+        ]
+    elif args.band == "left":
+        anchors = [
+            (0.05, 0.25), (0.15, 0.25), (0.25, 0.25), (0.35, 0.25),
+            (0.05, 0.50), (0.15, 0.50), (0.25, 0.50), (0.35, 0.50),
+            (0.05, 0.70), (0.15, 0.70), (0.25, 0.70), (0.35, 0.70),
+        ]
+    elif args.band == "center":
+        anchors = [
+            (0.40, 0.25), (0.50, 0.25), (0.60, 0.25),
+            (0.40, 0.50), (0.50, 0.50), (0.60, 0.50),
+            (0.40, 0.70), (0.50, 0.70), (0.60, 0.70),
+        ]
+    else:
+        anchors = [
+            (0.10, 0.25), (0.30, 0.25), (0.50, 0.25), (0.70, 0.25), (0.90, 0.25),
+            (0.10, 0.50), (0.30, 0.50), (0.50, 0.50), (0.70, 0.50), (0.90, 0.50),
+            (0.10, 0.70), (0.30, 0.70), (0.50, 0.70), (0.70, 0.70), (0.90, 0.70),
+        ]
+    print(f"band={args.band}, {len(anchors)} anchor(s)")
 
     target_idx = 0
     samples_per_anchor = max(1, args.samples // len(anchors))
@@ -114,6 +143,19 @@ def main() -> int:
             anchor_x_pct, anchor_y_pct = anchors[
                 target_idx % len(anchors)
             ]
+            # One history.jsonl per anchor so 80/10/10 splits balance
+            # by trajectory. Without this, all samples land in one
+            # mega-trajectory and the split assigns them all to a
+            # single bucket.
+            anchor_session = (
+                session_root
+                / f"anchor_{target_idx:02d}_x{anchor_x_pct:.2f}"
+                  f"_y{anchor_y_pct:.2f}"
+                / "homer"
+                / f"macos_chunk_{target_idx:02d}"
+            )
+            anchor_session.mkdir(parents=True, exist_ok=True)
+            out = anchor_session / "history.jsonl"
             target_idx += 1
 
             # 1. Slam to corner so the position is known.
@@ -124,24 +166,33 @@ def main() -> int:
                 )
             time.sleep(0.25)
 
-            # 2. Move to the anchor area using a rough open-loop ratio.
-            # macOS pointer-acceleration ≈ 0.0008 pct-per-hid at small
-            # velocities; coarser at large. Just get within ~30% of
-            # the anchor; the per-sample HID is what we're really
-            # measuring.
+            # 2. Walk to the anchor with the REAL measured macOS
+            # ratio (≈3e-4 pct/hid for full-127 bursts). The previous
+            # implementation used a 0.0008 ratio over 2 iterations,
+            # which catastrophically undershot — the cursor stayed
+            # near the top-left corner and the recorded samples were
+            # biased toward cursor_x ∈ [0, 0.15]. Iterating until
+            # within 2% of the anchor gives us samples at all cursor
+            # positions.
             target_x_px = anchor_x_pct * sw
             target_y_px = anchor_y_pct * sh
-            for _ in range(2):
+            for _ in range(20):
                 cx, cy = cursor_xy()
-                ratio = 0.0008  # rough seed
-                rem_dx_px = target_x_px - cx
-                rem_dy_px = target_y_px - cy
-                hid_dx = max(-127, min(127, int(
-                    rem_dx_px / sw / ratio
-                )))
-                hid_dy = max(-127, min(127, int(
-                    rem_dy_px / sh / ratio
-                )))
+                rem_dx_pct = (target_x_px - cx) / sw
+                rem_dy_pct = (target_y_px - cy) / sh
+                if abs(rem_dx_pct) < 0.02 and abs(rem_dy_pct) < 0.02:
+                    break
+                # 127 HID ≈ 0.036 pct on macOS. If residual exceeds
+                # what hid=127 can cover in one shot, send 127 in
+                # that direction.
+                if abs(rem_dx_pct) > 0.036:
+                    hid_dx = 127 if rem_dx_pct > 0 else -127
+                else:
+                    hid_dx = max(-127, min(127, int(rem_dx_pct / 3e-4)))
+                if abs(rem_dy_pct) > 0.036:
+                    hid_dy = 127 if rem_dy_pct > 0 else -127
+                else:
+                    hid_dy = max(-127, min(127, int(rem_dy_pct / 3e-4)))
                 if abs(hid_dx) < 2 and abs(hid_dy) < 2:
                     break
                 client.post(

@@ -97,15 +97,45 @@ def main() -> int:
             # per-step amplitudes the model saw in training), send a
             # crude open-loop burst in the right direction. Only ask
             # the model to refine once we're close.
+            #
+            # macOS pointer-accel caps hid=127 at ≈0.036 pct/step. A
+            # single-shot coarse seed therefore cannot cross large
+            # distances within the iter budget. Burst multiple HID
+            # sends within ONE iter when the residual exceeds what a
+            # single +127 can cover, so the iter budget is spent on
+            # refinement rather than slow open-loop crawl.
             BIG_DELTA = 0.05
+            PER_HID_PCT = 0.036  # ≈ what hid=127 produces on macOS
             if abs(dx_pct) > BIG_DELTA or abs(dy_pct) > BIG_DELTA:
                 # Coarse seed: ratio ≈ 0.0003 pct/hid → hid ≈ delta/0.0003
-                hid_dx = max(-127, min(127, int(dx_pct / 0.0003)))
-                hid_dy = max(-127, min(127, int(dy_pct / 0.0003)))
-            else:
-                hid_dx, hid_dy = model.inverse(
-                    dx_pct, dy_pct, cx, cy,
-                )
+                sign_x = 1 if dx_pct >= 0 else -1
+                sign_y = 1 if dy_pct >= 0 else -1
+                bursts_x = max(1, int(abs(dx_pct) / PER_HID_PCT))
+                bursts_y = max(1, int(abs(dy_pct) / PER_HID_PCT))
+                bursts = max(bursts_x, bursts_y)
+                # Don't blow past target — leave the final fraction for
+                # model refinement.
+                bursts = min(bursts, 6)
+                for _ in range(bursts):
+                    hid_dx_b = sign_x * 127 if abs(dx_pct) > 0.018 else 0
+                    hid_dy_b = sign_y * 127 if abs(dy_pct) > 0.018 else 0
+                    if hid_dx_b == 0 and hid_dy_b == 0:
+                        break
+                    client.post(
+                        "/api/mouse/move",
+                        json={"dx": hid_dx_b, "dy": hid_dy_b},
+                    )
+                    time.sleep(0.03)
+                    cx_b, cy_b = cursor_pct(sw, sh)
+                    dx_pct = tx - cx_b
+                    dy_pct = ty - cy_b
+                    if abs(dx_pct) < BIG_DELTA and abs(dy_pct) < BIG_DELTA:
+                        break
+                time.sleep(0.10)
+                continue
+            hid_dx, hid_dy = model.inverse(
+                dx_pct, dy_pct, cx, cy,
+            )
             client.post(
                 "/api/mouse/move",
                 json={"dx": int(hid_dx), "dy": int(hid_dy)},

@@ -12,7 +12,9 @@
     "hid_dy_norm"
   ],
   "augmented": true,
-  "train_rows": 5696,
-  "val_rows": 357,
-  "platform": "ubuntu-libinput-adaptive"
+  "train_rows": 10632,
+  "val_rows": 130,
+  "platform": "macos-iohid",
+  "version": "v5",
+  "notes": "trained on 2658 macos rows. Fixed collector anchor-walk so samples land at all screen positions (v4 had 95% of cursor_x in [0, 0.4]; v5 has meaningful representation through cursor_x=1.0). Canary 8/8 in mean 3.9 steps @ tol=0.01."
 }
