@@ -328,6 +328,15 @@ pair_once() {
 }
 
 # ── entry ──────────────────────────────────────────────────────────
+# macOS uses an entirely different BT stack (no bluetoothctl). Detect
+# early so the user gets a useful pointer instead of "command not
+# found" 200 lines into a Linux-only script.
+if [ "$(uname)" = "Darwin" ]; then
+    echo "This script is the Linux/BlueZ variant. macOS uses a"
+    echo "different Bluetooth stack — run the macOS variant instead:"
+    echo "  ./scripts/target_bt_reconnect_macos.sh ${*:-}"
+    exit 1
+fi
 command -v bluetoothctl >/dev/null 2>&1 || {
     echo "ERROR: bluetoothctl not found. Install bluez:"
     echo "  Debian/Ubuntu/Kali: sudo apt install -y bluez"

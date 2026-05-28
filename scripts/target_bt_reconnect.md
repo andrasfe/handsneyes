@@ -26,6 +26,22 @@ does not run on the Pi.
 
 ---
 
+## Pick the variant for your target OS
+
+| target OS | script | required CLI |
+|---|---|---|
+| Linux (Ubuntu / Debian / Kali / Fedora / Arch) | `target_bt_reconnect.sh`        | `bluetoothctl` (BlueZ) |
+| macOS                                          | `target_bt_reconnect_macos.sh`  | `blueutil` (brew install blueutil) |
+
+The two have the same flags (`--once`, `--pair`, `--probe`) and the
+same env vars (`PI_BT_MAC`, `PI_BT_NAMES`, `INTERVAL`, `SCAN_TIMEOUT`,
+`LOG_FILE`). Running either one on the wrong OS prints a friendly
+pointer to the right variant and exits.
+
+On macOS the first run of `blueutil` will trigger Privacy & Security
+prompts for **Bluetooth** + **Accessibility**. You only need to grant
+them once.
+
 ## Install
 
 ### Option 1 — one-liner from the running cc
