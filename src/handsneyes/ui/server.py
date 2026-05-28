@@ -655,7 +655,13 @@ def create_app(
         async with _manual_capture_lock:
             from datetime import datetime
             import cv2
-            from handsneyes.core.capture.webcam import WebcamCapture
+            # Honour the active target's capture_source. Without this,
+            # manual snapshots always grabbed via the webcam — fooling
+            # the operator with SMPTE bars whenever a screen-capture
+            # target was configured.
+            use_self = bool(
+                app.state.runtime_state.get("use_self_capture", False)
+            )
             resolution = None
             if (settings.capture.resolution_width
                     and settings.capture.resolution_height):
@@ -663,10 +669,17 @@ def create_app(
                     settings.capture.resolution_width,
                     settings.capture.resolution_height,
                 )
-            cap = WebcamCapture(
-                device_index=settings.capture.device_index,
-                resolution=resolution,
-            )
+            if use_self:
+                from handsneyes.core.capture.screen import ScreenCapture
+                cap = ScreenCapture(
+                    display_index=settings.capture.device_index,
+                )
+            else:
+                from handsneyes.core.capture.webcam import WebcamCapture
+                cap = WebcamCapture(
+                    device_index=settings.capture.device_index,
+                    resolution=resolution,
+                )
             out_dir = store.watch_dir / "manual"
             try:
                 out_dir.mkdir(parents=True, exist_ok=True)
@@ -749,7 +762,9 @@ def create_app(
         async with _manual_capture_lock:
             from datetime import datetime
             import cv2
-            from handsneyes.core.capture.webcam import WebcamCapture
+            use_self = bool(
+                app.state.runtime_state.get("use_self_capture", False)
+            )
             resolution = None
             if (settings.capture.resolution_width
                     and settings.capture.resolution_height):
@@ -757,9 +772,16 @@ def create_app(
                     settings.capture.resolution_width,
                     settings.capture.resolution_height,
                 )
-            cap = WebcamCapture(
-                device_index=settings.capture.device_index,
-                resolution=resolution,
+            if use_self:
+                from handsneyes.core.capture.screen import ScreenCapture
+                cap = ScreenCapture(
+                    display_index=settings.capture.device_index,
+                )
+            else:
+                from handsneyes.core.capture.webcam import WebcamCapture
+                cap = WebcamCapture(
+                    device_index=settings.capture.device_index,
+                    resolution=resolution,
             )
             out_dir = store.watch_dir / "manual"
             try:

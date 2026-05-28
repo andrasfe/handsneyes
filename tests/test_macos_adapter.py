@@ -21,8 +21,10 @@ def test_capabilities_skeleton() -> None:
     caps = a.capabilities()
     assert caps.supports_activities_sweep is False
     assert caps.supports_launcher_typeahead is True
-    # No models ship by default.
-    assert caps.has_pointer_accel_model is False
+    # pointer_accel-macos-v3 ships in platforms/macos/models/.
+    # longjump is not shipped (training data is too sparse for the
+    # macOS chained-burst regime; runtime falls back to closed-loop).
+    assert caps.has_pointer_accel_model is True
     assert caps.has_longjump_model is False
 
 

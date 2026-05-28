@@ -50,7 +50,14 @@ def _iter_history_files(runs_root: Path):
     return runs_root.glob("**/homer/*/history.jsonl")
 
 
-def _row_from_step(traj_id: str, idx: int, step: dict) -> dict | None:
+def _row_from_step(
+    traj_id: str,
+    idx: int,
+    step: dict,
+    *,
+    ratio_min: float = 3e-4,
+    ratio_max: float = 8e-3,
+) -> dict | None:
     hid_dx = step.get("hid_dx")
     hid_dy = step.get("hid_dy")
     if hid_dx is None or hid_dy is None:
@@ -61,22 +68,21 @@ def _row_from_step(traj_id: str, idx: int, step: dict) -> dict | None:
     mdy = step.get("measured_dy_pct")
     if mdx is None or mdy is None:
         return None
-    # Sanity gate on the per-axis pct-per-hid ratio. The libinput-
-    # adaptive curve produces ~5e-4 to ~5e-3 pct-per-hid depending
-    # on velocity; rows outside [3e-4, 8e-3] are almost certainly
-    # corrupted (operator moved the mouse mid-click, webcam glare
-    # confused HSV, modal dialog appeared, network glitch dropped
+    # Sanity gate on the per-axis pct-per-hid ratio.
+    #
+    # Default [3e-4, 8e-3] matches the Linux libinput-adaptive curve.
+    # macOS uses a different acceleration profile — pass
+    # `--ratio-min 1e-5 --ratio-max 2e-2` for that. Rows outside the
+    # gate are almost certainly corrupted (operator moved the mouse
+    # mid-click, cursor hit a screen edge, network glitch dropped
     # the HID, etc.) and would poison the next training round.
-    # Threshold chosen with ~2× margin around observed extremes.
-    SANE_MIN = 3e-4
-    SANE_MAX = 8e-3
     for h, m in ((hid_dx, mdx), (hid_dy, mdy)):
         if abs(h) < 3:
             # Skip axes with tiny HIDs — they're dominated by noise
             # in the measured delta and the ratio is meaningless.
             continue
         ratio = abs(float(m) / float(h))
-        if ratio < SANE_MIN or ratio > SANE_MAX:
+        if ratio < ratio_min or ratio > ratio_max:
             return None
     cursor = step.get("cursor_img")
     cx = cy = None
@@ -141,6 +147,17 @@ def main() -> int:
              "empty / unset to include all platforms (legacy behaviour, "
              "DANGEROUS when training a non-linux model since IOHID "
              "and libinput curves don't mix).",
+    )
+    ap.add_argument(
+        "--ratio-min", type=float, default=3e-4,
+        help="Lower bound on |measured_pct / hid|. Default 3e-4 "
+             "matches Linux libinput-adaptive. macOS IOHID needs "
+             "a wider gate — try 1e-5.",
+    )
+    ap.add_argument(
+        "--ratio-max", type=float, default=8e-3,
+        help="Upper bound on |measured_pct / hid|. Default 8e-3 "
+             "matches Linux libinput-adaptive. macOS needs ~2e-2.",
     )
     args = ap.parse_args()
     since_ts = None
@@ -213,7 +230,11 @@ def main() -> int:
                         step = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    r = _row_from_step(traj_id, i, step)
+                    r = _row_from_step(
+                        traj_id, i, step,
+                        ratio_min=args.ratio_min,
+                        ratio_max=args.ratio_max,
+                    )
                     if r is None:
                         continue
                     if args.hsv_only and r.get("note") != "hsv_measured":
