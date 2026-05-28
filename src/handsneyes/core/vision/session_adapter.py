@@ -94,6 +94,19 @@ class SessionAdapter:
         # session artefacts.
         self.output_dir = ctx.output_dir
         self._executor = _ExecutorAdapter(ctx)
+        # Optional direct-cursor oracle (Quartz on macOS self-capture).
+        # When present, the homer can skip CV cursor detection entirely.
+        self.cursor_reader = ctx.cursor_reader
+
+    async def read_cursor_pct(self) -> tuple[float, float] | None:
+        """Direct cursor read. Returns None when no oracle is wired.
+
+        Homer treats a non-None result as authoritative — pixel-precise,
+        with no CV ambiguity to resolve.
+        """
+        if self.cursor_reader is None:
+            return None
+        return await self.cursor_reader.read_pct()
 
     async def _ensure_client(self) -> None:
         # Vision client is created up-front by the controller; the

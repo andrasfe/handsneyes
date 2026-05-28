@@ -159,10 +159,30 @@ def make_target_context_factory(
                     e,
                 )
 
+        # On macOS self-capture the cursor isn't in the framebuffer
+        # the capture reads. The visual-servo loop would never converge.
+        # Attach a Quartz-based cursor oracle so the homer has an
+        # authoritative source.
+        cursor_reader = None
+        if effective_source == "screen" and adapter.name == "macos":
+            try:
+                from handsneyes.platforms.macos.cursor_reader import (
+                    QuartzCursorReader,
+                )
+                cursor_reader = QuartzCursorReader()
+            except Exception as e:
+                logger.warning(
+                    "QuartzCursorReader unavailable (%s) — homer will "
+                    "fail on macOS self-capture until pyobjc-framework-"
+                    "Quartz is installed",
+                    e,
+                )
+
         ctx = AgentContext(
             mouse=mouse,
             keyboard=keyboard,
             capture=capture,
+            cursor_reader=cursor_reader,
             vision_client=client,
             vision_model=vision_model,
             ocr_model=vision_model,

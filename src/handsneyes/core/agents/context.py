@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
     from handsneyes.core.capture.webcam import WebcamCapture
     from handsneyes.core.vault import Vault
+    from handsneyes.core.vision.cursor_reader import CursorReader
     from handsneyes.io.keyboard.base import KeyboardOutput
     from handsneyes.io.mouse.base import MouseOutput
     from handsneyes.platforms.base import PlatformAdapter
@@ -51,6 +52,12 @@ class AgentContext:
 
     # Vision input
     capture: WebcamCapture | None = None
+
+    # Optional direct-cursor oracle. When set, the visual-servo homer
+    # uses it as the authoritative cursor location instead of CV on the
+    # captured frame. Required for macOS self-capture, where the cursor
+    # is not composited into the framebuffer the capture sees.
+    cursor_reader: CursorReader | None = None
 
     # LLM clients — OpenAI-compatible (LM Studio) for multimodal calls
     vision_client: Any = None

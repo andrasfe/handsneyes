@@ -979,6 +979,139 @@ class VisualServoHomer:
 
     # ────────────────────── manual click-to-pixel ──────────────────────
 
+    async def _home_to_pixel_via_oracle(
+        self,
+        *,
+        x_pct: float,
+        y_pct: float,
+        button: str,
+        hotspot_offset: bool,
+        click: bool,
+        run_dir: Path,
+    ) -> ClickOutcome:
+        """Direct-cursor homing loop. Used when the session has a
+        cursor oracle (Quartz on macOS self-capture) instead of relying
+        on CV against a captured frame.
+
+        Mirrors ``scripts/canary_macos_direct.py``: pre-burst when the
+        residual exceeds one HID step, then hand to the pointer-accel
+        model for fine adjustment. No slam-to-corner, no HSV / variance
+        / frame-diff — none of those produce useful signal when the
+        cursor isn't in the captured frame to begin with.
+        """
+        history: list[StepRecord] = []
+        print(
+            f"  Homing via cursor oracle → ({x_pct:.2%}, {y_pct:.2%}) "
+            f"button={button}"
+        )
+        print(f"  Step log: {run_dir}/")
+
+        target_aim = (
+            x_pct + (HOTSPOT_OFFSET_X_PCT if hotspot_offset else 0.0),
+            y_pct + (HOTSPOT_OFFSET_Y_PCT if hotspot_offset else 0.0),
+        )
+
+        # Per-HID gain on macOS at hid=127. Stays in the file so the
+        # canary and the homer don't drift apart — copy if you tune it
+        # somewhere else.
+        PER_HID_PCT = 0.036
+        BIG_DELTA = 0.05
+        TOL = 0.008          # ≈ 30 px on 3840 — same as the canary
+        MAX_ITERS = 12
+        MAX_BURSTS_PER_ITER = 6
+
+        last_pos: tuple[float, float] | None = None
+        for it in range(MAX_ITERS):
+            pos = await self._session.read_cursor_pct()
+            if pos is None:
+                # Oracle failed mid-run. Bail out — falling back to
+                # CV is pointless on self-capture.
+                return ClickOutcome(
+                    clicked=False, steps=it,
+                    reason="cursor_reader_returned_none",
+                    proof_path=None, history=history,
+                )
+            cx, cy = pos
+            dx_pct = target_aim[0] - cx
+            dy_pct = target_aim[1] - cy
+            if abs(dx_pct) < TOL and abs(dy_pct) < TOL:
+                last_pos = (cx, cy)
+                print(
+                    f"  Converged in {it} iter(s); cursor at "
+                    f"({cx:.2%}, {cy:.2%})"
+                )
+                break
+
+            if abs(dx_pct) > BIG_DELTA or abs(dy_pct) > BIG_DELTA:
+                # Pre-burst phase: a single int8 HID maxes out at
+                # PER_HID_PCT — single-shot can't cover a large
+                # residual within the iter budget. Burst until close
+                # enough for the model to take over.
+                sign_x = 1 if dx_pct >= 0 else -1
+                sign_y = 1 if dy_pct >= 0 else -1
+                for _ in range(MAX_BURSTS_PER_ITER):
+                    hid_dx_b = sign_x * 127 if abs(dx_pct) > 0.018 else 0
+                    hid_dy_b = sign_y * 127 if abs(dy_pct) > 0.018 else 0
+                    if hid_dx_b == 0 and hid_dy_b == 0:
+                        break
+                    await self._send_hid(hid_dx_b, hid_dy_b)
+                    await asyncio.sleep(0.03)
+                    inner = await self._session.read_cursor_pct()
+                    if inner is None:
+                        break
+                    cx, cy = inner
+                    dx_pct = target_aim[0] - cx
+                    dy_pct = target_aim[1] - cy
+                    if abs(dx_pct) < BIG_DELTA and abs(dy_pct) < BIG_DELTA:
+                        break
+                await asyncio.sleep(0.08)
+                continue
+
+            # Refinement: ask the pointer-accel model for the HID that
+            # would land the cursor at the target in one shot.
+            if self._pointer_accel is None:
+                # No model — fall back to a per-axis open-loop ratio
+                # using the established macOS coefficient. Slower
+                # convergence but always terminates.
+                hid_dx = max(-127, min(127, int(dx_pct / 3e-4)))
+                hid_dy = max(-127, min(127, int(dy_pct / 3e-4)))
+            else:
+                hid_dx, hid_dy = self._pointer_accel.inverse(
+                    dx_pct, dy_pct, cx, cy,
+                )
+            await self._send_hid(int(hid_dx), int(hid_dy))
+            await asyncio.sleep(0.10)
+            last_pos = (cx, cy)
+        else:
+            final = await self._session.read_cursor_pct()
+            cx, cy = final if final is not None else (last_pos or (0.0, 0.0))
+            print(
+                f"  Max iters; cursor at ({cx:.2%}, {cy:.2%}); "
+                f"residual ({abs(target_aim[0]-cx):.3%}, "
+                f"{abs(target_aim[1]-cy):.3%})"
+            )
+            return ClickOutcome(
+                clicked=False, steps=MAX_ITERS,
+                reason="max_iters_oracle",
+                proof_path=None, history=history,
+            )
+
+        if click:
+            try:
+                await self._session._executor._mouse.click(button)
+            except Exception as e:
+                logger.warning("click dispatch failed: %s", e)
+                return ClickOutcome(
+                    clicked=False, steps=it,
+                    reason=f"click_dispatch_failed: {e}",
+                    proof_path=None, history=history,
+                )
+
+        return ClickOutcome(
+            clicked=click, steps=it,
+            reason="converged_oracle", proof_path=None, history=history,
+        )
+
     async def home_to_pixel(
         self,
         x_pct: float,
@@ -1019,6 +1152,18 @@ class VisualServoHomer:
             run_dir = PROOF_DIR / ts
         run_dir.mkdir(parents=True, exist_ok=True)
         history: list[StepRecord] = []
+
+        # Fast path: when the session has a direct cursor oracle
+        # (Quartz on macOS self-capture), the entire HSV / variance /
+        # frame-diff cascade is the wrong tool — the cursor isn't in
+        # the captured frame to begin with. Run the model-driven closed
+        # loop against the oracle instead, mirroring the canary.
+        if getattr(self._session, "cursor_reader", None) is not None:
+            return await self._home_to_pixel_via_oracle(
+                x_pct=x_pct, y_pct=y_pct, button=button,
+                hotspot_offset=hotspot_offset, click=click,
+                run_dir=run_dir,
+            )
 
         print(
             f"  Manual click homing → ({x_pct:.2%}, {y_pct:.2%}) "
