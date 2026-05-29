@@ -36,7 +36,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -414,20 +414,6 @@ class ClickOutcome:
     reason: str
     proof_path: str | None = None
     history: list[StepRecord] = field(default_factory=list)
-    # Where the homer believes the cursor ended up, regardless of
-    # whether a click actually fired. Populated even on
-    # max_iters / cursor_not_found returns so the caller can cache
-    # it as the starting position for the next homing attempt and
-    # skip the slam-to-corner + cursor-redetect cost.
-    final_cursor_pct: tuple[float, float] | None = None
-    # The cursor template the homer cropped during initial
-    # detection (or that was passed in via prev_cursor_template).
-    # ``np.ndarray`` typed loosely as ``Any`` to keep this
-    # dataclass importable from contexts that don't depend on
-    # numpy / opencv. The cc caches it across requests so
-    # subsequent clicks within the no-slam TTL skip the
-    # capture-and-crop step entirely.
-    cursor_template: Any | None = None
 
 
 class VisualServoHomer:
@@ -459,12 +445,6 @@ class VisualServoHomer:
         # could not be cropped, e.g. cursor sat too close to the
         # frame edge).
         self._cursor_template: np.ndarray | None = None
-        # Last cursor position the servo loop is aware of. Updated
-        # every iteration; read back by home_to_pixel after the loop
-        # returns and stashed on the ClickOutcome so the cc can
-        # cache it across requests (skipping slam-to-corner on the
-        # next click_at).
-        self._last_cursor_pct: tuple[float, float] | None = None
         # Reuse the scene-map and target-keyword machinery from the
         # earlier homer — that part still works, the bug was elsewhere.
         self._helper = ClosedLoopHomer(session=session)
@@ -953,28 +933,8 @@ class VisualServoHomer:
                     score_threshold=0.30,
                 )
                 if tm_hit is not None:
-                    tm_candidate = (tm_hit[0], tm_hit[1])
-                    # Movement sanity check: if we sent a non-trivial
-                    # HID but the template reports the cursor sitting
-                    # at exactly its previous position, the template
-                    # is almost certainly locked onto a static
-                    # screen-share artefact rather than the real
-                    # cursor (which would have moved by some amount,
-                    # however small). Reject and fall through to HSV
-                    # / frame-diff which CAN see motion. Without this
-                    # the homer can wedge for the rest of the run
-                    # because the matcher keeps returning the same
-                    # stale point.
-                    hid_significant = (
-                        abs(hid_dx) > 5 or abs(hid_dy) > 5
-                    )
-                    pos_unchanged = (
-                        abs(tm_candidate[0] - cursor_img[0]) < 0.001
-                        and abs(tm_candidate[1] - cursor_img[1]) < 0.001
-                    )
-                    if not (hid_significant and pos_unchanged):
-                        new_pos = tm_candidate
-                        locator_tag = "t"
+                    new_pos = (tm_hit[0], tm_hit[1])
+                    locator_tag = "t"
 
             # If HSV passed motion verification at init, use it per
             # step (it's the most reliable). Otherwise skip — it would
@@ -1046,19 +1006,6 @@ class VisualServoHomer:
                 self._refine_ratio(
                     hid_dx, hid_dy, measured_dx_pct, measured_dy_pct,
                 )
-                self._last_cursor_pct = cursor_img
-                # Belated template-capture: the initial-detection
-                # site often lands the cursor very close to the
-                # slam corner, where the 6%-of-image template patch
-                # would fall outside the frame and be silently
-                # dropped. Once the servo loop has carried the
-                # cursor inward, retry the capture — _maybe_capture
-                # is a no-op when the template is already set, so
-                # this fires at most once per run.
-                if self._cursor_template is None:
-                    self._maybe_capture_cursor_template(
-                        post_color, cursor_img,
-                    )
             else:
                 # Fall back to open-loop estimate; if we miss too many
                 # in a row, force a re-localize via oscillation.
@@ -1266,7 +1213,6 @@ class VisualServoHomer:
         hotspot_offset: bool = True,
         click: bool = True,
         prev_cursor_pct: tuple[float, float] | None = None,
-        prev_cursor_template: Any | None = None,
     ) -> ClickOutcome:
         """Home the cursor to a pre-located pixel on the webcam frame.
 
@@ -1298,15 +1244,6 @@ class VisualServoHomer:
             run_dir = PROOF_DIR / ts
         run_dir.mkdir(parents=True, exist_ok=True)
         history: list[StepRecord] = []
-
-        # Caller-supplied cursor template (cached across requests by
-        # the cc when the last successful click landed inside the
-        # no-slam TTL). Trusting it lets the homer skip both the
-        # capture_color() and the crop on follow-up clicks; the per-
-        # step matcher in _servo_loop picks it up via
-        # self._cursor_template exactly as if it had been cropped here.
-        if prev_cursor_template is not None and self._cursor_template is None:
-            self._cursor_template = prev_cursor_template
 
         # Fast path: when the session has a direct cursor oracle
         # (Quartz on macOS self-capture), the entire HSV / variance /
@@ -1445,15 +1382,12 @@ class VisualServoHomer:
         # servo loop, mirroring the equivalent capture point in
         # _run_inner. We need a frame to crop from; f0 was rebound
         # inside the oscillation branch, fall back to a fresh capture
-        # if neither branch left one in scope. If the caller already
-        # supplied a template (via prev_cursor_template above), we
-        # skip the work entirely — no extra capture_color() call.
-        if self._cursor_template is None:
-            try:
-                frame_for_template = f0  # type: ignore[has-type]
-            except NameError:
-                frame_for_template = await self._capture_color()
-            self._maybe_capture_cursor_template(frame_for_template, cursor_img)
+        # if neither branch left one in scope.
+        try:
+            frame_for_template = f0  # type: ignore[has-type]
+        except NameError:
+            frame_for_template = await self._capture_color()
+        self._maybe_capture_cursor_template(frame_for_template, cursor_img)
 
         target_img = (float(x_pct), float(y_pct))
         if hotspot_offset:
@@ -1492,11 +1426,7 @@ class VisualServoHomer:
         # In no-slam mode (chained clicks within an open UI) we
         # also constrain the closed loop to axis-aligned moves so
         # diagonal transit doesn't open sibling menus.
-        # Seed _last_cursor_pct with the current cursor estimate so
-        # an early-exit ClickOutcome (e.g. cursor_not_found) still
-        # carries SOME position the caller can cache.
-        self._last_cursor_pct = cursor_img
-        outcome = await self._servo_loop(
+        return await self._servo_loop(
             target_aim=target_aim, target_img=target_img,
             cursor_img=cursor_img, button=button, run_dir=run_dir,
             history=history, target_desc="<manual>",
@@ -1506,15 +1436,6 @@ class VisualServoHomer:
             click=click,
             axis_aligned=(prev_cursor_pct is not None),
         )
-        # Attach homer state to the outcome so the caller (cc) can
-        # cache it across requests — next click_at can pass them back
-        # as prev_cursor_pct / prev_cursor_template and skip the
-        # slam-to-corner + template-capture entirely.
-        if outcome.final_cursor_pct is None:
-            outcome.final_cursor_pct = self._last_cursor_pct
-        if outcome.cursor_template is None:
-            outcome.cursor_template = self._cursor_template
-        return outcome
 
     async def drag_to_pixels(
         self,

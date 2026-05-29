@@ -323,12 +323,8 @@ def create_app(
     # ``NO_SLAM_CACHE_TTL_S`` reuse that position as the starting
     # cursor and skip the slam-to-corner + oscillation detection
     # that would otherwise dismiss any open menu / modal / popover.
-    # We also stash the cursor TEMPLATE the homer captured during
-    # initial detection so the follow-up click can reuse it — same
-    # cross-correlation, no fresh capture_color() + crop. Both
-    # fields are invalidated by any other mouse action.
+    # Invalidated by any other mouse action.
     app.state.last_click_xy_at = None  # tuple[(x,y), epoch] | None
-    app.state.last_click_template = None  # np.ndarray | None
 
     # Homer-retrain state. n_trajectories_since_train is incremented
     # after every successful click_at — each click writes a fresh
@@ -995,57 +991,31 @@ def create_app(
                 # cursor is still at that pixel on the host. Reusing
                 # it as the starting cursor lets the next click stay
                 # within whatever UI element the previous click
-                # opened (menu, dialog, dropdown), AND skip the
-                # slam-to-corner + cursor-redetect cost on routine
-                # back-to-back clicks. We also reuse the cursor
-                # template the previous homer cropped, so the
-                # follow-up click doesn't have to capture a fresh
-                # frame to crop a new one.
-                #
-                # TTL is generous (15 min): the cursor doesn't move
-                # itself on the remote host; the cache stays valid
-                # for as long as nobody else is driving the target
-                # machine. Lowering would force needless recalibration
-                # on routine multi-click sessions.
-                NO_SLAM_CACHE_TTL_S = 900.0
+                # opened (menu, dialog, dropdown). Without this
+                # every click_at re-slams to the corner, which
+                # dismisses transient UI like LibreOffice's menus.
+                NO_SLAM_CACHE_TTL_S = 30.0
                 import time as _time
                 prev_cursor_pct = None
-                prev_cursor_template = None
                 cached = app.state.last_click_xy_at
                 if cached is not None:
                     cached_xy, cached_t = cached
                     if _time.time() - cached_t < NO_SLAM_CACHE_TTL_S:
                         prev_cursor_pct = cached_xy
-                        prev_cursor_template = app.state.last_click_template
                 outcome = await homer.home_to_pixel(
                     req.x_pct, req.y_pct, button=req.button,
                     prev_cursor_pct=prev_cursor_pct,
-                    prev_cursor_template=prev_cursor_template,
                 )
                 # click_at successfully landed the cursor at this
                 # pixel — update the scroll-home cache so the next
                 # /api/mouse/scroll at the same spot skips a fresh
                 # home, AND the no-slam cache so the next click_at
                 # within the TTL skips the slam phase entirely.
-                # final_cursor_pct from the homer is authoritative
-                # (the visually-confirmed cursor position) and may
-                # differ from the requested (x_pct, y_pct) by the
-                # click tolerance — use it in preference to the
-                # request when the homer reported one.
                 if bool(outcome.clicked):
                     app.state.last_scroll_home_xy = (req.x_pct, req.y_pct)
-                    final_xy = outcome.final_cursor_pct or (
-                        req.x_pct, req.y_pct,
-                    )
                     app.state.last_click_xy_at = (
-                        final_xy, _time.time(),
+                        (req.x_pct, req.y_pct), _time.time(),
                     )
-                    # Stash the template the homer ended up using
-                    # (either captured this run, or carried over from
-                    # prev_cursor_template). Reused on the next
-                    # click_at within TTL.
-                    if outcome.cursor_template is not None:
-                        app.state.last_click_template = outcome.cursor_template
                     # Every successful click produced a fresh
                     # history.jsonl trajectory — a new training row
                     # for the homer's retrain pipeline.
