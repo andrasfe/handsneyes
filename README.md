@@ -65,7 +65,7 @@ Three setup notes:
 
 1. **Pi BT HID pairing.** Bluetooth HID is point-to-point — the Pi
    can hold one host at a time. On the remote Mac, *Settings →
-   Bluetooth → connect* to the Pi (e.g. "TerminalEyes HID" or
+   Bluetooth → connect* to the Pi (e.g. "devmouse" or
    "keyboarder"). If another Mac is still paired, *Forget* the Pi on
    that Mac first.
 2. **Effective resolution gotcha.** The pointer-accel model is

@@ -222,7 +222,7 @@ Same as terminaleyes — `src/handsneyes/pi/` ports verbatim with brand-string r
      10.0.0.1                              10.0.0.2
 ```
 
-`handsneyes-pi` entry-point binary runs on the Pi. SDP record advertises as "handsneyes HID". `bluetoothd --noplugin=input --compat` is mandatory (see /docs/pi-setup or the original terminaleyes CLAUDE.md for the full debugging checklist — those hard-won lessons still apply).
+`handsneyes-pi` entry-point binary runs on the Pi. SDP record advertises as "devmouse". `bluetoothd --noplugin=input --compat` is mandatory (see /docs/pi-setup or the original terminaleyes CLAUDE.md for the full debugging checklist — those hard-won lessons still apply).
 
 ## Session output dir
 

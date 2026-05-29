@@ -180,7 +180,7 @@ else
             echo ""
             echo "  On the TARGET Mac:"
             echo "    1. Open System Settings → Bluetooth"
-            echo "    2. Look for 'handsneyes HID' or 'keyboarder' in Nearby Devices"
+            echo "    2. Look for 'devmouse' or 'keyboarder' in Nearby Devices"
             echo "    3. Click Connect"
             echo "    4. Dismiss 'Keyboard Setup Assistant' if it appears"
         elif [ "$ATTEMPT" -le 2 ]; then
@@ -200,7 +200,7 @@ else
             sleep 3
             echo "  Bluetooth restarted on Pi."
             echo "  On the TARGET Mac:"
-            echo "    1. Forget 'handsneyes HID' / 'keyboarder' if listed"
+            echo "    1. Forget 'devmouse' / 'keyboarder' if listed"
             echo "    2. Toggle Bluetooth off and on"
             echo "    3. Wait for device to appear, then Connect"
         else
@@ -223,7 +223,7 @@ else
             sleep 3
             echo "  Full reset done."
             echo "  On the TARGET Mac:"
-            echo "    1. Forget 'handsneyes HID' / 'keyboarder' if listed"
+            echo "    1. Forget 'devmouse' / 'keyboarder' if listed"
             echo "    2. Toggle Bluetooth off and on"
             echo "    3. Wait for device to appear in Nearby Devices"
             echo "    4. Click Connect"

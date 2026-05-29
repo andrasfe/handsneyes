@@ -24,14 +24,14 @@
 #                  B8:27:EB:E7:2B:70  or  b827ebe72b70 (blueutil
 #                  accepts both; we normalise to the dashed form).
 #   PI_BT_NAMES    Comma-separated name fallback when PI_BT_MAC isn't
-#                  set. Default: "keyboarder,handsneyes HID"
+#                  set. Default: "keyboarder,devmouse"
 #   INTERVAL       Seconds between checks. Default: 300 (5 min).
 #   SCAN_TIMEOUT   Seconds to scan when discovering for pair. Default: 25.
 #   LOG_FILE       Optional path; output is also appended there.
 
 set -u
 
-PI_BT_NAMES="${PI_BT_NAMES:-keyboarder,handsneyes HID}"
+PI_BT_NAMES="${PI_BT_NAMES:-keyboarder,devmouse}"
 PI_BT_MAC="${PI_BT_MAC:-}"
 INTERVAL="${INTERVAL:-300}"
 SCAN_TIMEOUT="${SCAN_TIMEOUT:-25}"

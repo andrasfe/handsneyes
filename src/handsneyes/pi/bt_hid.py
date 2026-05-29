@@ -170,10 +170,10 @@ SDP_RECORD_XML = """<?xml version="1.0" encoding="UTF-8" ?>
     </sequence>
   </attribute>
   <attribute id="0x0100"> <!-- ServiceName -->
-    <text value="TerminalEyes HID" />
+    <text value="devmouse" />
   </attribute>
   <attribute id="0x0101"> <!-- ServiceDescription -->
-    <text value="Bluetooth Keyboard + Mouse for TerminalEyes" />
+    <text value="Bluetooth Keyboard + Mouse (devmouse)" />
   </attribute>
   <attribute id="0x0102"> <!-- ProviderName -->
     <text value="handsneyes" />

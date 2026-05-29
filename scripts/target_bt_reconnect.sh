@@ -28,7 +28,7 @@
 # script sees on this host):
 #
 #   PI_BT_NAMES   Comma-separated list of names to look up.
-#                 Default: "keyboarder,handsneyes HID"
+#                 Default: "keyboarder,devmouse"
 #   PI_BT_MAC     Explicit MAC, e.g. AA:BB:CC:DD:EE:FF — skips the
 #                 by-name lookup. Use this when bluetoothctl can't
 #                 find the device by name.
@@ -40,7 +40,7 @@
 set -u
 
 # ── config ─────────────────────────────────────────────────────────
-PI_BT_NAMES="${PI_BT_NAMES:-keyboarder,handsneyes HID}"
+PI_BT_NAMES="${PI_BT_NAMES:-keyboarder,devmouse}"
 INTERVAL="${INTERVAL:-300}"
 SCAN_TIMEOUT="${SCAN_TIMEOUT:-25}"
 LOG_FILE="${LOG_FILE:-}"
