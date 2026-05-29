@@ -26,9 +26,11 @@ from handsneyes.core.vision import (
     LongJumpConfig,
     OCRHit,
     PointerAccelConfig,
+    capture_cursor_template,
     enhance_for_ocr,
     enhance_for_screen,
     find_cursor_hsv,
+    find_cursor_template,
     find_text,
     have_ocr,
     numpy_to_base64_png,
@@ -139,6 +141,103 @@ def test_find_cursor_hsv_on_synthetic_red_blob_does_not_crash() -> None:
     # would couple the test to internal tuning constants.
     hit = find_cursor_hsv(img)
     assert hit is None or isinstance(hit, CursorHit)
+
+
+# ─── cursor_finder: template path ──────────────────────────────────
+
+
+def _synthetic_cursor_scene(
+    w: int = 320,
+    h: int = 240,
+    cursor_pct: tuple[float, float] = (0.5, 0.5),
+) -> tuple[np.ndarray, np.ndarray]:
+    """A textured background with a distinctive arrow-shaped cursor
+    drawn at ``cursor_pct``. Returns ``(frame, template)`` where the
+    template is cropped via :func:`capture_cursor_template` from the
+    frame's known cursor position --- exactly the workflow the homer
+    will use at run time.
+    """
+    rng = np.random.default_rng(seed=0)
+    img = rng.integers(40, 90, size=(h, w, 3), dtype=np.uint8)
+    # Draw a small white arrow at the requested position so the
+    # template carries a distinctive shape rather than a plain block
+    # of colour (which would degenerate into "find a white square").
+    cx = int(round(cursor_pct[0] * w))
+    cy = int(round(cursor_pct[1] * h))
+    arrow = np.array([
+        [cx, cy], [cx + 12, cy + 6], [cx + 6, cy + 6],
+        [cx + 6, cy + 14], [cx, cy + 14],
+    ], dtype=np.int32)
+    cv2.fillPoly(img, [arrow], color=(240, 240, 240))
+    tmpl = capture_cursor_template(img, cursor_pct, size_pct=0.10)
+    return img, tmpl  # type: ignore[return-value]
+
+
+def test_capture_cursor_template_inside_frame_returns_patch() -> None:
+    img = _blank(200, 200, val=128)
+    tmpl = capture_cursor_template(img, (0.5, 0.5), size_pct=0.10)
+    assert tmpl is not None
+    assert tmpl.ndim == 3 and tmpl.shape[2] == 3
+    # 200 * 0.10 = 20 → patch should be 20×20.
+    assert tmpl.shape[0] == 20 and tmpl.shape[1] == 20
+
+
+def test_capture_cursor_template_outside_frame_returns_none() -> None:
+    img = _blank(200, 200, val=128)
+    # A 25% patch centred at the edge cannot fit.
+    assert capture_cursor_template(img, (0.0, 0.5), size_pct=0.25) is None
+
+
+def test_find_cursor_template_locates_known_position() -> None:
+    img, tmpl = _synthetic_cursor_scene(
+        cursor_pct=(0.3, 0.6),
+    )
+    assert tmpl is not None
+    hit = find_cursor_template(img, tmpl)
+    assert hit is not None
+    x_pct, y_pct, score = hit
+    # Template centre vs known position: within one pixel on each
+    # axis, which on a 320x240 frame is ~0.3% / 0.4%.
+    assert abs(x_pct - 0.3) < 0.01
+    assert abs(y_pct - 0.6) < 0.02
+    assert score > 0.95  # synthetic template matches itself near-perfectly
+
+
+def test_find_cursor_template_returns_none_when_absent() -> None:
+    _, tmpl = _synthetic_cursor_scene(cursor_pct=(0.5, 0.5))
+    blank = _blank(320, 240, val=60)
+    hit = find_cursor_template(blank, tmpl, score_threshold=0.5)
+    assert hit is None
+
+
+def test_find_cursor_template_roi_search_picks_closest_match() -> None:
+    """When two cursor-like patches exist, the ROI-restricted search
+    should ignore the far one and lock onto the candidate inside the
+    search window.
+    """
+    # First scene gives us the template + a cursor at (0.3, 0.6).
+    near, tmpl = _synthetic_cursor_scene(cursor_pct=(0.3, 0.6))
+    assert tmpl is not None
+    # Paint a second arrow at a far position to act as a distractor.
+    far_cx = int(round(0.85 * near.shape[1]))
+    far_cy = int(round(0.20 * near.shape[0]))
+    arrow = np.array([
+        [far_cx, far_cy], [far_cx + 12, far_cy + 6],
+        [far_cx + 6, far_cy + 6], [far_cx + 6, far_cy + 14],
+        [far_cx, far_cy + 14],
+    ], dtype=np.int32)
+    cv2.fillPoly(near, [arrow], color=(240, 240, 240))
+    # Full-frame search may pick either depending on noise; ROI
+    # search around (0.3, 0.6) must lock onto the near one.
+    hit = find_cursor_template(
+        near, tmpl,
+        search_center_pct=(0.32, 0.58),
+        search_radius_pct=0.12,
+    )
+    assert hit is not None
+    x_pct, y_pct, _ = hit
+    assert abs(x_pct - 0.3) < 0.02
+    assert abs(y_pct - 0.6) < 0.03
 
 
 # ─── ocr_finder ─────────────────────────────────────────────────────

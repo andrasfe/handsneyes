@@ -11,11 +11,13 @@ machinery in Phase B.
 from handsneyes.core.vision.cursor_finder import (
     CursorHit,
     annotate_cursor,
+    capture_cursor_template,
     find_cursor_by_variance,
     find_cursor_hsv,
     find_cursor_hsv_motion,
     find_cursor_hsv_motion_directed,
     find_cursor_hsv_near,
+    find_cursor_template,
 )
 from handsneyes.core.vision.imaging import (
     enhance_for_ocr,
@@ -54,6 +56,7 @@ __all__ = [
     "PointerAccelModel",
     "annotate_cursor",
     "annotate_ocr_hit",
+    "capture_cursor_template",
     "chunk_hid_for_bursts",
     "enhance_for_ocr",
     "enhance_for_screen",
@@ -62,6 +65,7 @@ __all__ = [
     "find_cursor_hsv_motion",
     "find_cursor_hsv_motion_directed",
     "find_cursor_hsv_near",
+    "find_cursor_template",
     "find_text",
     "have_ocr",
     "numpy_to_base64_png",

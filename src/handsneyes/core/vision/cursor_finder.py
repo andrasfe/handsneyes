@@ -546,6 +546,146 @@ def find_cursor_by_variance(
     return cx / w, cy / h
 
 
+# ─────────────────── template-based finder ───────────────────
+#
+# Premise: cursors are pixel-exact, known images. Once we've located
+# the cursor ONCE (via HSV, oscillation-variance, or a Quartz oracle),
+# we can crop its visual signature from that frame and use plain
+# ``cv2.matchTemplate`` to find it in subsequent frames.
+#
+# Why this matters for cross-mac control through a screen-share
+# virtual camera:
+#
+#   - HSV is calibrated for redglass (Ubuntu); macOS default cursors
+#     are small, low-saturation, and frequently anti-aliased by the
+#     screen-share encoder. HSV mis-detects or stays silent.
+#   - Oscillation-variance works on any cursor but takes ~150 ms of
+#     jiggle per detection. Fine for the initial slam-to-corner,
+#     painful per-step inside a servo loop.
+#   - Frame-diff (the current per-step locator) requires nothing on
+#     the screen to be moving except the cursor. Encoder noise,
+#     blinking carets, and re-rendered subpixel text routinely
+#     violate that, sending the homer chasing a phantom blob.
+#
+# Template matching is fast (single ``cv2.matchTemplate`` pass,
+# sub-millisecond on a small ROI), pixel-precise, and indifferent
+# to background animation as long as the cursor itself looks similar
+# enough between the template-capture frame and the current frame.
+
+
+# Default template patch size: 25% of the slam-to-corner gap in % of
+# image, conservatively chosen so the patch always contains the full
+# cursor footprint (default macOS arrow at 96 px ≈ 5% of a 1920-wide
+# frame) plus a few pixels of margin to make the cross-correlation
+# stable.
+DEFAULT_TEMPLATE_SIZE_PCT = 0.06
+
+# Match score below this is treated as "not found". TM_CCOEFF_NORMED
+# ranges over [-1, 1]; on noisy webcam frames a real cursor match
+# sits around 0.6-0.9, a pure background patch around 0.0-0.3, so
+# 0.45 is a comfortable cutoff that admits some encoder noise without
+# allowing background lock-ons.
+DEFAULT_MATCH_THRESHOLD = 0.45
+
+
+def capture_cursor_template(
+    frame_bgr: np.ndarray,
+    cursor_pct: tuple[float, float],
+    *,
+    size_pct: float = DEFAULT_TEMPLATE_SIZE_PCT,
+) -> np.ndarray | None:
+    """Crop a square cursor-template patch centred on the given
+    cursor position (in image fractions).
+
+    Returns the BGR patch ready to be fed to
+    :func:`find_cursor_template`, or ``None`` if the requested crop
+    would fall outside the frame.
+
+    The patch is captured straight from the source frame — no
+    masking, no thresholding — so it carries whatever encoder
+    artefacts the stream applies to the cursor. Matching against
+    later frames from the same stream therefore enjoys identical
+    distortion on both sides of the correlation.
+    """
+    if frame_bgr.ndim != 3:
+        return None
+    h, w = frame_bgr.shape[:2]
+    side = int(round(min(h, w) * float(size_pct)))
+    if side < 8:
+        return None
+    half = side // 2
+    cx = int(round(float(cursor_pct[0]) * w))
+    cy = int(round(float(cursor_pct[1]) * h))
+    x0 = cx - half
+    y0 = cy - half
+    x1 = x0 + side
+    y1 = y0 + side
+    if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
+        return None
+    return frame_bgr[y0:y1, x0:x1].copy()
+
+
+def find_cursor_template(
+    frame_bgr: np.ndarray,
+    template_bgr: np.ndarray,
+    *,
+    search_center_pct: tuple[float, float] | None = None,
+    search_radius_pct: float | None = None,
+    score_threshold: float = DEFAULT_MATCH_THRESHOLD,
+) -> tuple[float, float, float] | None:
+    """Locate ``template_bgr`` in ``frame_bgr`` via normalised
+    cross-correlation.
+
+    Returns ``(x_pct, y_pct, score)`` for the cursor centre (in image
+    fractions) and the match score, or ``None`` if the best match
+    falls below ``score_threshold``.
+
+    When ``search_center_pct`` is given (e.g. the previous step's
+    cursor estimate) and ``search_radius_pct`` is set, the search is
+    restricted to a square ROI around that point. This is a dramatic
+    speedup inside a servo loop --- the cursor moves at most a few
+    HID's worth of pixels between consecutive captures --- and it
+    rejects any far-field background patch that happens to look more
+    cursor-like than the real one.
+    """
+    if frame_bgr.ndim != 3 or template_bgr.ndim != 3:
+        return None
+    h, w = frame_bgr.shape[:2]
+    th, tw = template_bgr.shape[:2]
+    if th >= h or tw >= w:
+        return None
+
+    if search_center_pct is not None and search_radius_pct is not None:
+        radius = int(round(min(h, w) * float(search_radius_pct)))
+        cx = int(round(float(search_center_pct[0]) * w))
+        cy = int(round(float(search_center_pct[1]) * h))
+        x0 = max(0, cx - radius)
+        y0 = max(0, cy - radius)
+        x1 = min(w, cx + radius)
+        y1 = min(h, cy + radius)
+        # Need room for the template inside the ROI.
+        if x1 - x0 <= tw or y1 - y0 <= th:
+            return None
+        roi = frame_bgr[y0:y1, x0:x1]
+        roi_offset_x = x0
+        roi_offset_y = y0
+    else:
+        roi = frame_bgr
+        roi_offset_x = 0
+        roi_offset_y = 0
+
+    res = cv2.matchTemplate(roi, template_bgr, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(res)
+    if float(max_val) < float(score_threshold):
+        return None
+    # ``max_loc`` is the top-left of the best-matching template
+    # placement, in ROI coordinates. Centre + offset back to frame
+    # coordinates, then normalise.
+    centre_x = roi_offset_x + max_loc[0] + tw / 2.0
+    centre_y = roi_offset_y + max_loc[1] + th / 2.0
+    return centre_x / w, centre_y / h, float(max_val)
+
+
 def setup_instructions() -> str:
     """One-shot setup for the target Ubuntu machine's cursor.
 
