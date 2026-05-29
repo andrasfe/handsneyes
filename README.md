@@ -28,6 +28,61 @@ transport    = "bt"
 screen_size  = [1920, 1080]
 ```
 
+`camera_index` accepts an integer or the string `"auto"`. With
+`"auto"`, the loader probes cv2 indices, vetoes any device that's
+just mirroring the dev mac's own desktop (useless self-capture), and
+prefers low-temporal-noise feeds (a screen-share virtual camera
+carrying the remote machine's mirrored desktop) over high-noise ones
+(a physical webcam pointed at a monitor). The choice is cached
+process-wide, so several `"auto"` targets share one probe pass.
+
+### Self-driving the same Mac
+
+Set `capture_source = "screen"` and add `platform = "macos"` to drive
+the same Mac the cc runs on. The Command Center attaches a Quartz-
+based cursor oracle (`CGEventGetLocation`) so the homer reads the
+cursor directly without trying to find it in the captured frame —
+macOS doesn't composite the cursor into the framebuffer that
+`screencapture` / PIL `ImageGrab` see, so vision-only loops never
+converge on self-capture.
+
+### Controlling a remote Mac via screen-share
+
+Mirror the target Mac to the dev mac via AirPlay or Sidecar, exposing
+its desktop as a virtual camera. Then add:
+
+```toml
+[[target]]
+name         = "remote-mac"
+platform     = "macos"
+camera_index = "auto"                  # picks the screen-share device
+pi_url       = "http://10.0.0.2:8080"
+transport    = "bt"
+screen_size  = [1920, 1080]            # whatever the virtual camera streams at
+```
+
+Three setup notes:
+
+1. **Pi BT HID pairing.** Bluetooth HID is point-to-point — the Pi
+   can hold one host at a time. On the remote Mac, *Settings →
+   Bluetooth → connect* to the Pi (e.g. "TerminalEyes HID" or
+   "keyboarder"). If another Mac is still paired, *Forget* the Pi on
+   that Mac first.
+2. **Effective resolution gotcha.** The pointer-accel model is
+   trained at one *effective* ("UI Looks like") display resolution.
+   Different effective resolutions on dev and target produce a
+   constant percent-keyed over- or under-shoot. The cc UI has an
+   `accel X × Y` control in the chat row — set it to
+   `(target_effective_w / dev_effective_w, target_effective_h /
+   dev_effective_h)`. Example: dev at *Looks like 3840 × 2160* and
+   remote at *Looks like 1728 × 1117* → `0.45 × 0.52`. Find the
+   numbers via `system_profiler SPDisplaysDataType | grep -E
+   "Resolution|UI Looks like"`.
+3. **Default macOS cursor is hard to track.** The HSV finder was
+   tuned against Ubuntu's `redglass`; on macOS, enable a high-contrast
+   pointer (Settings → Accessibility → Display → Pointer: max
+   saturation, max size) so the homer's CV cursor finder can lock on.
+
 ## Run
 
 **Command-line:**
