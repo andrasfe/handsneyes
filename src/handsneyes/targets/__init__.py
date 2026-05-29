@@ -119,10 +119,20 @@ class TargetRegistry:
                     f"{path}: target {name!r}: screen_size must be "
                     f"[width, height]"
                 )
+            raw_idx = row.get("camera_index", 0)
+            if isinstance(raw_idx, str) and raw_idx.strip().lower() == "auto":
+                # Resolve once per process — cached inside discover so
+                # multiple "auto" targets share one probe run.
+                from handsneyes.core.capture.discover import (
+                    autodetect_camera_index,
+                )
+                resolved_idx = autodetect_camera_index()
+            else:
+                resolved_idx = int(raw_idx)
             targets[name] = Target(
                 name=name,
                 platform=str(row.get("platform", "headless")),
-                camera_index=int(row.get("camera_index", 0)),
+                camera_index=resolved_idx,
                 pi_url=str(row.get("pi_url", "http://10.0.0.2:8080")),
                 transport=str(row.get("transport", "bt")),  # type: ignore[arg-type]
                 screen_size=(int(screen[0]), int(screen[1])),
