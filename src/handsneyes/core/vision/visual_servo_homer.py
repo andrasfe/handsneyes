@@ -966,7 +966,47 @@ class VisualServoHomer:
                         abs(tm_candidate[0] - cursor_img[0]) < 0.001
                         and abs(tm_candidate[1] - cursor_img[1]) < 0.001
                     )
-                    if hid_any and pos_static:
+                    # Spurious-motion check: when HID along an axis
+                    # is zero (no commanded motion on that axis) but
+                    # the template reports a non-trivial change on
+                    # the same axis, the matcher is locked onto a
+                    # different static artefact than last step — not
+                    # tracking the cursor. The cursor doesn't
+                    # teleport sideways. Combined with the
+                    # static-position wedge above, this catches both
+                    # failure modes the matcher can fall into on a
+                    # screen-share virtual camera: stuck on one
+                    # attractor (pos_static), and bouncing among a
+                    # small set of attractors (spurious_zero_axis).
+                    implied_dx = tm_candidate[0] - cursor_img[0]
+                    implied_dy = tm_candidate[1] - cursor_img[1]
+                    spurious_x = (
+                        abs(hid_dx) <= 1 and abs(implied_dx) > 0.01
+                    )
+                    spurious_y = (
+                        abs(hid_dy) <= 1 and abs(implied_dy) > 0.01
+                    )
+                    # Direction-disagree check: when HID was
+                    # significant in one direction on an axis but
+                    # the template reports motion in the OPPOSITE
+                    # direction beyond noise, the matcher hopped
+                    # to a different attractor on that axis. Also
+                    # treated as a wedge.
+                    direction_disagrees_x = (
+                        abs(hid_dx) > 5
+                        and abs(implied_dx) > 0.005
+                        and (hid_dx > 0) != (implied_dx > 0)
+                    )
+                    direction_disagrees_y = (
+                        abs(hid_dy) > 5
+                        and abs(implied_dy) > 0.005
+                        and (hid_dy > 0) != (implied_dy > 0)
+                    )
+                    spurious = (
+                        spurious_x or spurious_y
+                        or direction_disagrees_x or direction_disagrees_y
+                    )
+                    if (hid_any and pos_static) or spurious:
                         self._tm_wedge_count += 1
                         if self._tm_wedge_count >= 2:
                             # Re-localize via oscillation AND
