@@ -445,6 +445,12 @@ class VisualServoHomer:
         # could not be cropped, e.g. cursor sat too close to the
         # frame edge).
         self._cursor_template: np.ndarray | None = None
+        # Number of consecutive servo-loop iterations where the
+        # template-match returned the same pixel position despite
+        # the homer having sent a non-zero HID. Counts toward the
+        # wedge-detection threshold; reset on any iteration where
+        # the template's reported position actually changes.
+        self._tm_wedge_count: int = 0
         # Reuse the scene-map and target-keyword machinery from the
         # earlier homer — that part still works, the bug was elsewhere.
         self._helper = ClosedLoopHomer(session=session)
@@ -933,8 +939,47 @@ class VisualServoHomer:
                     score_threshold=0.30,
                 )
                 if tm_hit is not None:
-                    new_pos = (tm_hit[0], tm_hit[1])
-                    locator_tag = "t"
+                    tm_candidate = (tm_hit[0], tm_hit[1])
+                    # Wedge detector. If the template keeps reporting
+                    # the SAME pixel position despite us having sent
+                    # a non-trivial HID, it's locked onto a static
+                    # screen-share encoder artefact (a UI border, a
+                    # repainted icon) that scores higher on
+                    # cross-correlation than the true cursor's new
+                    # position. Without this check the homer wedges
+                    # for the rest of the run reporting zero motion
+                    # every step.
+                    #
+                    # Threshold "any non-zero HID" rather than
+                    # something larger: even a 1-HID move SHOULD
+                    # produce SOME pixel displacement on the matcher,
+                    # however small, when the matcher is actually
+                    # tracking the cursor. A flat-zero response means
+                    # the matcher isn't tracking the cursor.
+                    #
+                    # On reject we count consecutive wedges, and after
+                    # two in a row we invalidate the template for the
+                    # rest of the run — frame-diff is more robust to
+                    # encoder noise even though it's slower.
+                    hid_any = (hid_dx != 0 or hid_dy != 0)
+                    pos_static = (
+                        abs(tm_candidate[0] - cursor_img[0]) < 0.001
+                        and abs(tm_candidate[1] - cursor_img[1]) < 0.001
+                    )
+                    if hid_any and pos_static:
+                        self._tm_wedge_count += 1
+                        if self._tm_wedge_count >= 2:
+                            print(
+                                f"  [{step:02d}] template-match wedged "
+                                f"({self._tm_wedge_count} static-hits) "
+                                f"— retiring template for this run."
+                            )
+                            self._cursor_template = None
+                            self._tm_wedge_count = 0
+                    else:
+                        self._tm_wedge_count = 0
+                        new_pos = tm_candidate
+                        locator_tag = "t"
 
             # If HSV passed motion verification at init, use it per
             # step (it's the most reliable). Otherwise skip — it would
