@@ -224,6 +224,14 @@ Same as terminaleyes — `src/handsneyes/pi/` ports verbatim with brand-string r
 
 `handsneyes-pi` entry-point binary runs on the Pi. SDP record advertises as "devmouse". `bluetoothd --noplugin=input --compat` is mandatory (see /docs/pi-setup or the original terminaleyes CLAUDE.md for the full debugging checklist — those hard-won lessons still apply).
 
+### BT HID gotchas (verified live, 2026-05-29)
+
+- **`Pairable = true` in main.conf is silently ignored** — BlueZ 5.82 logs `Unknown key Pairable for group General` and the setting never applies. Pairable must be re-asserted at runtime via `bluetoothctl pairable on`. `bt-strip-audio-sdp.sh` does this on every `bluetooth.service` cycle (via `PartOf=bluetooth.service`).
+- **Stale Pi-side bond records block new pair attempts at HCI level** — when the Mac forgets the Pi but the Pi keeps the Mac's bond, the next pair attempt is auto-rejected before bluetoothd or the agent log records anything. Symptom: Mac spinner times out, Pi journal is empty. Fix: `sudo bluetoothctl remove <MAC>` for every entry in `bluetoothctl devices`. `setup_bt_hid.sh` step [4.25/6] does this on every install.
+- **HFP/SAP/A2DP SDP records are baked into bluetoothd's protocol stack** — `--noplugin=hfp,a2dp,...` only filters plugin-level registrations, not the protocol-level ones bluetoothd publishes itself. macOS sees the audio profiles in the SDP record and silently routes Mac system audio to the Pi. `bt-strip-audio-sdp.sh` walks `sdptool browse local` and removes each by handle after every bluetoothd start, plus re-asserts `pairable on` and `system-alias devmouse`.
+- **Bash-shim pairing agent fails with `Failed to register agent object` on BlueZ 5.82** — interactive bluetoothctl exits before its D-Bus session completes agent registration. Use the Python D-Bus agent (`scripts/bt-agent.py`) — registers via `dbus.service.Object` and stays in a GLib main loop. Same pattern every working BT HID emulator project converges on.
+- **macOS caches BT device name per-MAC forever** — even after a Forget + Repair, the old name can persist. Toggle Mac Bluetooth off/on (menu bar) to flush, or `sudo killall bluetoothd` on the Mac in extreme cases.
+
 ## Session output dir
 
 Every captured frame goes to a single per-invocation directory (replayable). Resolution order:
