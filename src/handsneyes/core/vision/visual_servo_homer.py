@@ -811,9 +811,17 @@ class VisualServoHomer:
                         initial_ratio_x=self._pct_per_hid_x,
                         initial_ratio_y=self._pct_per_hid_y,
                     )
+                    sx, sy = self._pointer_accel_scale()
+                    if sx != 1.0 or sy != 1.0:
+                        hid_dx = int(round(hid_dx * sx))
+                        hid_dy = int(round(hid_dy * sy))
                     print(
                         f"  [{step:02d}] open-loop seed "
                         f"via PointerAccelModel → hid=({hid_dx},{hid_dy})"
+                        + (
+                            f" (scale x={sx:.3f}, y={sy:.3f})"
+                            if (sx != 1.0 or sy != 1.0) else ""
+                        )
                     )
                 except Exception as e:
                     logger.debug("pointer-accel inverse failed: %s", e)
@@ -1079,6 +1087,10 @@ class VisualServoHomer:
                 hid_dx, hid_dy = self._pointer_accel.inverse(
                     dx_pct, dy_pct, cx, cy,
                 )
+                sx, sy = self._pointer_accel_scale()
+                if sx != 1.0 or sy != 1.0:
+                    hid_dx = int(round(hid_dx * sx))
+                    hid_dy = int(round(hid_dy * sy))
             await self._send_hid(int(hid_dx), int(hid_dy))
             await asyncio.sleep(0.10)
             last_pos = (cx, cy)
@@ -1966,6 +1978,29 @@ class VisualServoHomer:
                 self._pct_per_hid_y = new
 
     # ────────────────────── plumbing ──────────────────────
+
+    def _pointer_accel_scale(self) -> tuple[float, float]:
+        """UI-controlled multipliers applied to the model's HID output.
+
+        Read from the session's ``ctx.scratch`` (snapshotted there by
+        the cc factory at run start from the runtime_state values the
+        UI writes via ``/api/pointer-accel-scale``). Default is
+        ``(1.0, 1.0)`` — no-op — so legacy code paths and direct CLI
+        invocations of the homer are unaffected.
+
+        Used to bridge the dev / target effective-resolution gap
+        without retraining: the same HID moves the same physical
+        pixels on both machines, but those pixels are a different
+        percent of each machine's screen, so the model's
+        percent-keyed predictions need a constant rescale per axis.
+        """
+        ctx = getattr(self._session, "_ctx", None)
+        if ctx is None:
+            return 1.0, 1.0
+        scratch = getattr(ctx, "scratch", None) or {}
+        sx = float(scratch.get("pointer_accel_scale_x", 1.0))
+        sy = float(scratch.get("pointer_accel_scale_y", 1.0))
+        return sx, sy
 
     async def _slam_to_corner(self) -> None:
         print("  Slamming to top-left corner...")

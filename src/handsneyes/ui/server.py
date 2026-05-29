@@ -101,6 +101,19 @@ class ScheduleCancelRequest(BaseModel):
     id: str = Field(min_length=1)
 
 
+class PointerAccelScaleRequest(BaseModel):
+    """Per-axis multiplier applied to the pointer-accel model's HID
+    output, to bridge a dev / target effective-resolution gap without
+    retraining. Range chosen so the user can dial the cursor in
+    interactively from the cc UI."""
+    scale_x: float = Field(ge=0.05, le=4.0)
+    scale_y: float = Field(ge=0.05, le=4.0)
+
+
+class CaptureSourceRequest(BaseModel):
+    self_capture: bool
+
+
 class MouseClickAtRequest(BaseModel):
     x_pct: float = Field(ge=0.0, le=1.0)
     y_pct: float = Field(ge=0.0, le=1.0)
@@ -2449,10 +2462,8 @@ def create_app(
     # Lets the UI flip between webcam (default) and "grab local
     # display" without editing targets.toml + restarting cc. Takes
     # effect on the NEXT /api/run or /api/mouse/click_at — already-
-    # running runs aren't interrupted.
-
-    class CaptureSourceRequest(BaseModel):
-        self_capture: bool
+    # running runs aren't interrupted. CaptureSourceRequest lives at
+    # module scope alongside the other body schemas.
 
     @app.get("/api/capture-source")
     def capture_source_state() -> JSONResponse:
@@ -2470,6 +2481,54 @@ def create_app(
             "screen" if req.self_capture else "(target default)",
         )
         return JSONResponse({"ok": True, "self_capture": req.self_capture})
+
+    # ── pointer-accel scale (cross-target tuning) ─────────────────
+    # The pointer_accel model is trained at one effective display
+    # resolution (the dev mac's "UI Looks like" size). When deployed
+    # against a target running at a different effective resolution
+    # — typical when controlling a different mac via screen-share —
+    # the same HID moves the same physical pixels but a different
+    # PERCENT of the target's screen, so the model's percent-keyed
+    # predictions systematically over- or under-shoot by the ratio
+    # of effective resolutions. The scale_x / scale_y multipliers
+    # below are applied to the model's HID output at send time. A
+    # value of 1.0 is no-op; for a remote at half the dev's
+    # effective width (e.g. v7 trained at 3840 wide, remote at 1728
+    # wide) the right scale is roughly 1728/3840 = 0.45.
+    # Schema lives at module scope so Pydantic can fully resolve the
+    # type at openapi-generation time (closure-scoped BaseModels
+    # produce ForwardRef errors).
+
+    @app.get("/api/pointer-accel-scale")
+    def pointer_accel_scale_state() -> JSONResponse:
+        return JSONResponse({
+            "scale_x": float(
+                app.state.runtime_state.get(
+                    "pointer_accel_scale_x", 1.0,
+                ),
+            ),
+            "scale_y": float(
+                app.state.runtime_state.get(
+                    "pointer_accel_scale_y", 1.0,
+                ),
+            ),
+        })
+
+    @app.post("/api/pointer-accel-scale")
+    def pointer_accel_scale_set(
+        req: PointerAccelScaleRequest,
+    ) -> JSONResponse:
+        app.state.runtime_state["pointer_accel_scale_x"] = float(req.scale_x)
+        app.state.runtime_state["pointer_accel_scale_y"] = float(req.scale_y)
+        logger.info(
+            "pointer-accel scale override → x=%.3f y=%.3f",
+            req.scale_x, req.scale_y,
+        )
+        return JSONResponse({
+            "ok": True,
+            "scale_x": req.scale_x,
+            "scale_y": req.scale_y,
+        })
 
     # ── scheduler (recurring controller intents) ──────────────────
     # The chat-form's Send button fires a controller intent once. The

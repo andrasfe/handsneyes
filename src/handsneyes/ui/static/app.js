@@ -50,6 +50,54 @@ const $optSelfCapture = document.getElementById("opt-self-capture");
     }
   });
 })();
+
+// Pointer-accel scale (x, y). Multipliers applied to the
+// pointer-accel model's HID output to bridge a dev / target
+// effective-resolution gap. Server is authoritative; we sync the
+// inputs on load and POST on change. Takes effect on the NEXT
+// click_at / run; in-flight runs are not affected.
+const $optAccelX = document.getElementById("opt-accel-x");
+const $optAccelY = document.getElementById("opt-accel-y");
+(function _wirePointerAccelScale() {
+  if (!$optAccelX || !$optAccelY) return;
+  fetch("/api/pointer-accel-scale")
+    .then(r => r.ok ? r.json() : null)
+    .then(j => {
+      if (!j) return;
+      $optAccelX.value = (+j.scale_x).toFixed(2);
+      $optAccelY.value = (+j.scale_y).toFixed(2);
+    })
+    .catch(() => {});
+  const pushScale = async () => {
+    const sx = parseFloat($optAccelX.value);
+    const sy = parseFloat($optAccelY.value);
+    if (!Number.isFinite(sx) || !Number.isFinite(sy)) return;
+    try {
+      const r = await fetch("/api/pointer-accel-scale", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scale_x: sx, scale_y: sy }),
+      });
+      if (!r.ok) {
+        appendSystemLog(
+          "ERROR",
+          `pointer-accel scale POST failed: ${r.status}`,
+        );
+      } else {
+        appendSystemLog(
+          "INFO",
+          `pointer-accel scale → x=${sx.toFixed(3)} y=${sy.toFixed(3)} ` +
+          "(applies on next run)",
+        );
+      }
+    } catch (e) {
+      appendSystemLog("ERROR", `pointer-accel scale error: ${e}`);
+    }
+  };
+  $optAccelX.addEventListener("change", pushScale);
+  $optAccelY.addEventListener("change", pushScale);
+})();
+
 const $optPlatform = document.getElementById("opt-platform");
 const $optVault = document.getElementById("opt-vault");
 const $btnLock = document.getElementById("btn-lock");

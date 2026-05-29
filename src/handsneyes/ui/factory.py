@@ -190,6 +190,16 @@ def make_target_context_factory(
             output_dir=output_dir,
             platform=adapter,
         )
+        # Snapshot UI-controlled tuning knobs into ctx.scratch so the
+        # homer can pick them up at run time without coupling to the
+        # FastAPI app state. Live changes to these from the UI take
+        # effect on the NEXT run, not in-flight.
+        ctx.scratch["pointer_accel_scale_x"] = float(
+            runtime_state.get("pointer_accel_scale_x", 1.0),
+        )
+        ctx.scratch["pointer_accel_scale_y"] = float(
+            runtime_state.get("pointer_accel_scale_y", 1.0),
+        )
         return ctx, raw_kb, mouse, capture
 
     return factory
