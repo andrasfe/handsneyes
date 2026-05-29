@@ -717,12 +717,23 @@ class VisualServoHomer:
         # the budget.
         residual_at_last_check = initial_residual
         last_check_step = 0
+        # Track the smallest residual seen during the run. If we exit
+        # the loop without geometric_confirm (max steps / no-progress
+        # bail) but the run got close at some point, fall back to a
+        # best-effort click rather than NOT clicking — the cursor
+        # ended up close enough for the operator's intended target,
+        # they'd rather have an imprecise click than nothing.
+        best_residual = initial_residual
+        best_cursor_img = cursor_img
         for step in range(1, max_steps_dynamic + 1):
             t_step = time.monotonic()
 
             dx_pct = target_aim[0] - cursor_img[0]
             dy_pct = target_aim[1] - cursor_img[1]
             residual = math.hypot(dx_pct, dy_pct)
+            if residual < best_residual:
+                best_residual = residual
+                best_cursor_img = cursor_img
             # Periodic no-progress check.
             if step > 10 and step - last_check_step >= 5:
                 if residual_at_last_check - residual < 0.01:
@@ -1232,9 +1243,33 @@ class VisualServoHomer:
                 history[-1],
             )
 
+        # Best-effort click. The cursor got close at some point during
+        # the run (best_residual) — close enough that the operator's
+        # intended target is almost certainly still under the cursor.
+        # Fire the click rather than NOT clicking on a noisy locator's
+        # last-step glitch. Threshold = 1.5× click_tol_pct picks up the
+        # "0.77% reported, click tolerance 1.0%, locator hallucinated
+        # 8% jump and bailed" case without admitting genuine misses.
+        BEST_EFFORT_TOL = click_tol_pct * 1.5
+        if click and best_residual <= BEST_EFFORT_TOL:
+            print(
+                f"  Best-effort click: best residual during run was "
+                f"{best_residual:.2%} ≤ {BEST_EFFORT_TOL:.1%}. Firing."
+            )
+            try:
+                await self._session._executor._mouse.click(button)
+                return ClickOutcome(
+                    clicked=True, steps=step,
+                    reason="best_effort",
+                    proof_path=last_proof, history=history,
+                )
+            except Exception as e:
+                logger.warning(
+                    "best-effort click dispatch failed: %s", e,
+                )
         print(
             f"  Reached MAX_STEPS={max_steps_dynamic} without geometric "
-            "confirm. NOT clicking."
+            f"confirm (best residual was {best_residual:.2%}). NOT clicking."
         )
         return ClickOutcome(
             clicked=False, steps=MAX_STEPS, reason="max_steps",
@@ -1608,7 +1643,15 @@ class VisualServoHomer:
             history=history, target_desc="<manual>",
             verify_navigation=False, last_proof=None,
             confirm_frames=1,
-            click_tol_pct=0.006,
+            # 0.010 (1.0%) instead of the original 0.006: on cross-mac
+            # control through a screen-share virtual camera, the
+            # frame-diff locator's noise floor is comfortably above
+            # 0.6% — clicks that LOOK precise to the operator (cursor
+            # visibly on the target) report residuals like 0.77%,
+            # never trigger the geometric confirm, and the run ends
+            # NOT clicking. 1% = ~19 px on a 1920-wide frame, still
+            # tighter than any button you'd want to click.
+            click_tol_pct=0.010,
             click=click,
             axis_aligned=(prev_cursor_pct is not None),
         )
