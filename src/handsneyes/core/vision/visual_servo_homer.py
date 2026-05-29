@@ -687,12 +687,54 @@ class VisualServoHomer:
         in the column/row of the open UI element.
         """
         confirm_count = 0
-        for step in range(1, MAX_STEPS + 1):
+        # Adaptive step budget. The default MAX_STEPS=30 is fine for
+        # the common case of clicking somewhere near where the last
+        # click landed, but routinely runs out when the no-slam cache
+        # leaves the cursor at (say) the bottom of the screen and the
+        # next aim is at the top: each step covers 5–6% on a big-y
+        # move so 70%+ residuals need 15–20 steps just to traverse,
+        # let alone refine. Scale the budget with the initial
+        # straight-line residual so a long move gets the headroom it
+        # needs without bloating the budget for short ones.
+        initial_dx = target_aim[0] - cursor_img[0]
+        initial_dy = target_aim[1] - cursor_img[1]
+        initial_residual = math.hypot(initial_dx, initial_dy)
+        # 30 + 80 * residual: small move = 30 steps, 25% move = 50
+        # steps, 50% move = 70 steps, 70%+ = 86–90 clamped to 100.
+        max_steps_dynamic = max(
+            MAX_STEPS,
+            min(100, int(MAX_STEPS + 80 * initial_residual)),
+        )
+        if max_steps_dynamic > MAX_STEPS:
+            print(
+                f"  Adaptive step budget: {max_steps_dynamic} "
+                f"(initial residual {initial_residual:.1%})"
+            )
+        # No-progress bail-out: track residual every 5 steps. If we
+        # haven't shaved >1% off the residual in any 5-step window
+        # after step 10, the homer is wedged in a way the wedge
+        # detector didn't catch — bail rather than chew the rest of
+        # the budget.
+        residual_at_last_check = initial_residual
+        last_check_step = 0
+        for step in range(1, max_steps_dynamic + 1):
             t_step = time.monotonic()
 
             dx_pct = target_aim[0] - cursor_img[0]
             dy_pct = target_aim[1] - cursor_img[1]
             residual = math.hypot(dx_pct, dy_pct)
+            # Periodic no-progress check.
+            if step > 10 and step - last_check_step >= 5:
+                if residual_at_last_check - residual < 0.01:
+                    print(
+                        f"  [{step:02d}] no-progress bail-out: "
+                        f"residual {residual_at_last_check:.2%} → "
+                        f"{residual:.2%} in {step - last_check_step} "
+                        f"steps. Stopping."
+                    )
+                    break
+                residual_at_last_check = residual
+                last_check_step = step
 
             if residual <= click_tol_pct:
                 confirm_count += 1
@@ -1191,8 +1233,8 @@ class VisualServoHomer:
             )
 
         print(
-            f"  Reached MAX_STEPS={MAX_STEPS} without geometric confirm. "
-            "NOT clicking."
+            f"  Reached MAX_STEPS={max_steps_dynamic} without geometric "
+            "confirm. NOT clicking."
         )
         return ClickOutcome(
             clicked=False, steps=MAX_STEPS, reason="max_steps",
