@@ -47,11 +47,13 @@ from handsneyes.core.vision.closed_loop_homer import (
 from handsneyes.core.vision.cursor_finder import (
     CursorHit,
     annotate_cursor,
+    capture_cursor_template,
     find_cursor_by_variance,
     find_cursor_hsv,
     find_cursor_hsv_motion,
     find_cursor_hsv_motion_directed,
     find_cursor_hsv_near,
+    find_cursor_template,
     setup_instructions,
 )
 from handsneyes.core.vision.ocr_finder import (
@@ -433,6 +435,16 @@ class VisualServoHomer:
         # (Reddit logo, etc.) that would otherwise hijack every step's
         # detection and freeze the cursor estimate.
         self._hsv_enabled = False
+        # Cursor template captured at the first successful initial
+        # detection of a run. Subsequent per-step locates inside
+        # _servo_loop try this first via ROI-restricted normalised
+        # cross-correlation — pixel-precise, sub-millisecond, and
+        # robust to the screen-share encoder noise that defeats
+        # frame-diff on cross-mac targets. None when no successful
+        # initial detection has happened yet (or when the template
+        # could not be cropped, e.g. cursor sat too close to the
+        # frame edge).
+        self._cursor_template: np.ndarray | None = None
         # Reuse the scene-map and target-keyword machinery from the
         # earlier homer — that part still works, the bug was elsewhere.
         self._helper = ClosedLoopHomer(session=session)
@@ -596,6 +608,12 @@ class VisualServoHomer:
                     )
             except Exception as e:
                 logger.warning("HSV cross-check error: %s", e)
+
+        # Stash a cursor-template patch from the initial frame for
+        # per-step matching in the servo loop. Both the HSV-verified
+        # and the oscillation-only branches converge here with
+        # cursor_img + f0 already validated.
+        self._maybe_capture_cursor_template(f0, cursor_img)
 
         # 3) Locate the target (model: ShowUI via scene-map). One-shot.
         target_img = await self._locate_target(f0, target_desc, run_dir)
@@ -861,12 +879,67 @@ class VisualServoHomer:
             measured_dx_pct: float | None = None
             measured_dy_pct: float | None = None
 
+            new_pos: tuple[float, float] | None = None
+            new_hit: CursorHit | None = None
+            # Single-character tag recording which locator produced
+            # new_pos this iteration: 't' = template-match, 'h' = HSV
+            # motion-directed, 'd' = ROI-prior frame-diff, '·' = none
+            # (fell through to open-loop estimate). Printed inline in
+            # the per-step log so the operator can see at a glance
+            # which path is carrying the run.
+            locator_tag = "·"
+
+            # Template-match fast path. When we captured a cursor
+            # template during initial detection, do a ROI-restricted
+            # normalised cross-correlation around the open-loop
+            # estimate of where the cursor should be NOW. Sub-
+            # millisecond, pixel-precise, and indifferent to the
+            # encoder noise that breaks frame-diff on screen-share
+            # virtual cameras. We only trust the hit if it lies
+            # close to the open-loop expectation — far-field locks
+            # on background patches that happen to resemble the
+            # cursor are exactly what we want to reject.
+            if self._cursor_template is not None:
+                # Search radius adapts to how confident we are in
+                # the open-loop estimate. Early in the run the ratio
+                # is wildly off (default seed vs the target's actual
+                # accel curve) and ``expected_new`` can be 10%+ from
+                # the true cursor — the search has to be generous.
+                # Late in the run the ratio is well-learned and we
+                # tighten to reject far-field background lock-ons.
+                expected_new = (
+                    cursor_img[0] + hid_dx * self._pct_per_hid_x,
+                    cursor_img[1] + hid_dy * self._pct_per_hid_y,
+                )
+                expected_motion_mag = math.hypot(
+                    hid_dx * self._pct_per_hid_x,
+                    hid_dy * self._pct_per_hid_y,
+                )
+                # 0.7 × expected motion absorbs the ratio's worst-case
+                # bias; floor of 4% keeps small refinement steps
+                # robust to noise; ceiling of 30% prevents pathological
+                # whole-frame searches.
+                search_radius = max(0.04, min(0.30, 0.7 * expected_motion_mag + 0.04))
+                tm_hit = find_cursor_template(
+                    post_color, self._cursor_template,
+                    search_center_pct=expected_new,
+                    search_radius_pct=search_radius,
+                    # 0.30 instead of 0.45: the synthetic-data tests
+                    # confirmed self-matches sit >0.9, but real
+                    # screen-share encodings lossy-compress the cursor
+                    # patch, so a 0.3–0.5 match on a true cursor is
+                    # not uncommon. Far-field background patches
+                    # rarely exceed 0.2.
+                    score_threshold=0.30,
+                )
+                if tm_hit is not None:
+                    new_pos = (tm_hit[0], tm_hit[1])
+                    locator_tag = "t"
+
             # If HSV passed motion verification at init, use it per
             # step (it's the most reliable). Otherwise skip — it would
             # otherwise lock onto static red UI elements.
-            new_pos: tuple[float, float] | None = None
-            new_hit: CursorHit | None = None
-            if self._hsv_enabled:
+            if new_pos is None and self._hsv_enabled:
                 # Position-aware HSV with a motion-proportional
                 # search radius. Without this, a static red icon
                 # near the target (e.g. a tooltip dot under an
@@ -908,6 +981,7 @@ class VisualServoHomer:
                 )
                 if new_hit is not None:
                     new_pos = (new_hit.x_pct, new_hit.y_pct)
+                    locator_tag = "h"
             if new_pos is None:
                 # ROI-prior diff: we know roughly where the cursor
                 # moved, so look for the changed region near
@@ -921,6 +995,7 @@ class VisualServoHomer:
                 )
                 if new_pos is not None:
                     self._diff_misses_in_a_row = 0
+                    locator_tag = "d"
                 else:
                     self._diff_misses_in_a_row += 1
 
@@ -957,7 +1032,8 @@ class VisualServoHomer:
                 else "meas=HSV_MISS"
             )
             print(
-                f"  [{step:02d}] hid=({hid_dx:+4d},{hid_dy:+4d}) "
+                f"  [{step:02d}|{locator_tag}] "
+                f"hid=({hid_dx:+4d},{hid_dy:+4d}) "
                 f"cursor→({cursor_img[0]:.2%},{cursor_img[1]:.2%}) "
                 f"aim=({target_aim[0]:.2%},{target_aim[1]:.2%}) "
                 f"resid={residual:.2%} {measured_str} "
@@ -1301,6 +1377,17 @@ class VisualServoHomer:
                     )
             except Exception as e:
                 logger.warning("HSV cross-check error: %s", e)
+
+        # Stash a cursor-template patch for per-step matching in the
+        # servo loop, mirroring the equivalent capture point in
+        # _run_inner. We need a frame to crop from; f0 was rebound
+        # inside the oscillation branch, fall back to a fresh capture
+        # if neither branch left one in scope.
+        try:
+            frame_for_template = f0  # type: ignore[has-type]
+        except NameError:
+            frame_for_template = await self._capture_color()
+        self._maybe_capture_cursor_template(frame_for_template, cursor_img)
 
         target_img = (float(x_pct), float(y_pct))
         if hotspot_offset:
@@ -1990,6 +2077,39 @@ class VisualServoHomer:
                 self._pct_per_hid_y = new
 
     # ────────────────────── plumbing ──────────────────────
+
+    def _maybe_capture_cursor_template(
+        self,
+        frame_bgr: np.ndarray,
+        cursor_pct: tuple[float, float] | None,
+    ) -> None:
+        """Stash a cursor-template crop from ``frame_bgr`` at the
+        first successful initial detection of a run.
+
+        No-op after the first call (so subsequent re-localisations
+        during a run keep using the template captured from the
+        clean initial frame, rather than re-cropping from a frame
+        where the cursor might be sitting over a different
+        background). No-op when the cursor sits too close to the
+        frame edge for the template to fit.
+        """
+        if self._cursor_template is not None:
+            return
+        if cursor_pct is None:
+            return
+        try:
+            tmpl = capture_cursor_template(frame_bgr, cursor_pct)
+        except Exception as e:
+            logger.debug("template capture errored: %s", e)
+            return
+        if tmpl is None:
+            return
+        self._cursor_template = tmpl
+        print(
+            f"  Captured cursor template at "
+            f"({cursor_pct[0]:.2%}, {cursor_pct[1]:.2%}); "
+            f"shape={tmpl.shape[1]}×{tmpl.shape[0]}"
+        )
 
     def _pointer_accel_scale(self) -> tuple[float, float]:
         """UI-controlled multipliers applied to the model's HID output.
