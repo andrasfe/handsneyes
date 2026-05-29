@@ -2491,22 +2491,59 @@ class VisualServoHomer:
     ) -> tuple[float, float] | None:
         """Locate cursor by jiggling and finding the high-variance cluster.
 
-        Sends a small oscillation pattern, captures ~6 frames during,
-        and lets ``find_cursor_by_variance`` pick the moving cluster.
+        Sends an oscillation pattern, captures one frame per step, and
+        lets ``find_cursor_by_variance`` pick the moving cluster.
         Robust to cursor color/shape — only requires the cursor exists
         and the rest of the screen is roughly static.
+
+        Two-attempt cascade. The default amplitudes (±20 / ±40 HID)
+        work fine for a redglass cursor on a webcam-pointed-at-Ubuntu
+        target, but they're too small on a screen-share virtual camera
+        looking at a remote macOS desktop: the default macOS arrow is
+        ~15 px and low-contrast, and a 20-40 HID jiggle leaves a
+        variance footprint smaller than the per-frame encoder noise.
+        If the small shake fails, retry with ~3× amplitude and a
+        looser variance threshold + min-active-pixels gate — same
+        idea a human uses when they can't find their cursor and start
+        waving the mouse harder.
         """
-        frames: list[np.ndarray] = []
-        # Take an initial frame, then oscillate, capturing each step.
-        frames.append(await self._capture_gray())
-        # Small symmetric oscillation: trajectory returns to start so
-        # the variance trail's centroid ≈ the original cursor pos.
-        oscillation = [(20, 0), (-40, 0), (40, 0), (0, 20), (0, -40), (0, 40)]
-        for dx, dy in oscillation:
-            await self._send_hid(dx, dy)
-            await asyncio.sleep(0.10)
+        # (amplitudes, variance_threshold, min_active_pixels) per attempt
+        attempts = [
+            # Original profile — fast, low false-positive rate.
+            ([(20, 0), (-40, 0), (40, 0), (0, 20), (0, -40), (0, 40)],
+             8.0, 30),
+            # Big-shake fallback — covers 3× more screen, accepts a
+            # fainter variance signature (encoder noise on a lossy
+            # screen-share stream sits around 3-5 std-dev per pixel;
+            # the cursor's true motion sits above that).
+            ([(60, 0), (-120, 0), (120, 0), (0, 60), (0, -120), (0, 120)],
+             4.0, 12),
+        ]
+        result = None
+        for idx, (oscillation, var_thr, min_px) in enumerate(attempts):
+            frames: list[np.ndarray] = []
             frames.append(await self._capture_gray())
-        result = find_cursor_by_variance(frames)
+            for dx, dy in oscillation:
+                await self._send_hid(dx, dy)
+                await asyncio.sleep(0.10)
+                frames.append(await self._capture_gray())
+            result = find_cursor_by_variance(
+                frames,
+                variance_threshold=var_thr,
+                min_active_pixels=min_px,
+            )
+            if result is not None:
+                if idx > 0:
+                    print(
+                        f"  Cursor found by oscillation on attempt "
+                        f"#{idx + 1} (bigger shake, var_thr={var_thr})"
+                    )
+                break
+            if idx + 1 < len(attempts):
+                print(
+                    f"  Oscillation attempt #{idx + 1} found nothing — "
+                    "shaking harder."
+                )
         if run_dir is not None:
             try:
                 # Save the variance map for debugging.
