@@ -969,13 +969,50 @@ class VisualServoHomer:
                     if hid_any and pos_static:
                         self._tm_wedge_count += 1
                         if self._tm_wedge_count >= 2:
+                            # Re-localize via oscillation AND
+                            # recapture a fresh template. Crucial
+                            # when the cursor has changed shape since
+                            # the start of the run — e.g. moved over
+                            # a text input and turned into an I-beam,
+                            # or over a resize handle and turned into
+                            # a crosshair. The old-shape template
+                            # then fits no image patch at all and the
+                            # matcher locks on whatever static UI
+                            # element is closest to the search center.
                             print(
                                 f"  [{step:02d}] template-match wedged "
                                 f"({self._tm_wedge_count} static-hits) "
-                                f"— retiring template for this run."
+                                "— re-localizing + recapturing template."
                             )
                             self._cursor_template = None
                             self._tm_wedge_count = 0
+                            relocated = await self._find_cursor_via_oscillation(
+                                run_dir,
+                                label=f"step{step:02d}_wedge_relocate",
+                            )
+                            if relocated is not None:
+                                cursor_img = relocated
+                                # Capture template from the cursor's
+                                # CURRENT shape, whatever it is now.
+                                fresh_frame = await self._capture_color()
+                                self._maybe_capture_cursor_template(
+                                    fresh_frame, cursor_img,
+                                )
+                                self._diff_misses_in_a_row = 0
+                                print(
+                                    f"  [{step:02d}|r] re-localized to "
+                                    f"({cursor_img[0]:.2%},"
+                                    f"{cursor_img[1]:.2%}); "
+                                    f"template "
+                                    f"{'recaptured' if self._cursor_template is not None else 'still missing'}"
+                                )
+                                # Skip this step's measurement / ratio
+                                # update — the oscillation jiggle's
+                                # motion isn't the homer's intended
+                                # signal and would poison _refine_ratio.
+                                continue
+                            # else: fall through; existing fallbacks
+                            # may still find the cursor.
                     else:
                         self._tm_wedge_count = 0
                         new_pos = tm_candidate
@@ -1068,6 +1105,18 @@ class VisualServoHomer:
                     )
                     if relocated is not None:
                         cursor_img = relocated
+                        # Recapture the template too. If we got here
+                        # via 3 diff-misses on a screen-share stream,
+                        # the cursor has likely changed shape
+                        # (I-beam over text, crosshair over an image,
+                        # etc.) and the old template no longer fits.
+                        # Drop the stale template first so the
+                        # capture helper actually fires.
+                        self._cursor_template = None
+                        fresh_frame = await self._capture_color()
+                        self._maybe_capture_cursor_template(
+                            fresh_frame, cursor_img,
+                        )
                     self._diff_misses_in_a_row = 0
 
             elapsed = time.monotonic() - t_step
