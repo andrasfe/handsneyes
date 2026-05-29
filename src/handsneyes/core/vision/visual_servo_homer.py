@@ -112,9 +112,13 @@ MIN_HID_PER_AXIS = 4
 # the learned ratio mis-collapses.
 MAX_HID_PER_AXIS = 220
 
-# Floor / ceiling on the learned HID-to-image ratio. Sane bounds for
-# cursor acceleration on most desktops.
-RATIO_MIN = 0.0006
+# Floor / ceiling on the learned HID-to-image ratio. Wide bounds so
+# the homer can adapt to remote targets running at different effective
+# resolutions / acceleration curves (e.g. controlling an MBP 14" at
+# "Looks like 1728×1117" from a dev mac at "Looks like 3840×2160",
+# where the remote's actual ratio sits around 0.1‰ — well below the
+# previous 0.6‰ floor that locked the homer to its default seed).
+RATIO_MIN = 0.00005
 RATIO_MAX = 0.0050
 
 # Settle delay between "send move" and "capture post-move frame".
@@ -1965,7 +1969,15 @@ class VisualServoHomer:
             current = (self._pct_per_hid_x if axis == "x"
                        else self._pct_per_hid_y)
             expected = abs(hid) * current
-            if abs(meas) < 0.25 * expected:
+            # 0.05 instead of 0.25: when the homer is started against a
+            # target whose accel curve differs sharply from the default
+            # (e.g. cross-mac control through a screen-share virtual
+            # camera), the FIRST honest measurement is below the
+            # default "noise" threshold and would be rejected, which
+            # locks the ratio at the seed forever. 0.05 still rejects
+            # genuine HSV mis-detects (true noise sits around 10× below
+            # this) but admits the legitimate cross-target signal.
+            if abs(meas) < 0.05 * expected:
                 continue  # observed too small → likely HSV mis-detect
             obs = meas / hid
             if not (RATIO_MIN <= abs(obs) <= RATIO_MAX):
