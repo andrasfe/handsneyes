@@ -1174,6 +1174,65 @@ class VisualServoHomer:
                 else:
                     self._diff_misses_in_a_row += 1
 
+            # Outlier rejection on whatever locator survived the
+            # cascade. The frame-diff and template-match locators
+            # both have failure modes where they report a cursor
+            # position far from the cursor's actual position — most
+            # often because they latched onto an encoder artefact or
+            # a UI repaint patch. If we blindly accept those readings
+            # the homer treats the bad position as truth, computes a
+            # huge corrective HID, sends it, and the cursor really
+            # does fly away from where the operator wants it. By the
+            # time best-effort fires the cursor is far from target.
+            #
+            # Sanity check: the implied per-axis motion should at
+            # least have the same SIGN as the HID we just sent, and
+            # the magnitude shouldn't massively exceed what
+            # HID × current_ratio would predict. If the locator
+            # reports a wild outlier, drop it and use the open-loop
+            # estimate instead. The homer's existing _refine_ratio
+            # filter then has nothing to corrupt.
+            if new_pos is not None:
+                implied_dx = new_pos[0] - cursor_img[0]
+                implied_dy = new_pos[1] - cursor_img[1]
+                expected_dx = hid_dx * self._pct_per_hid_x
+                expected_dy = hid_dy * self._pct_per_hid_y
+                # "Wild" = implied magnitude is more than 4× the
+                # expected per-axis motion, AND larger than 2% in
+                # absolute terms (so we don't reject normal
+                # convergence steps where expected is tiny).
+                wild_x = (
+                    abs(hid_dx) > 5
+                    and abs(implied_dx) > 0.02
+                    and abs(implied_dx) > 4 * max(abs(expected_dx), 0.005)
+                )
+                wild_y = (
+                    abs(hid_dy) > 5
+                    and abs(implied_dy) > 0.02
+                    and abs(implied_dy) > 4 * max(abs(expected_dy), 0.005)
+                )
+                # Direction disagreement: HID significant on an axis
+                # but implied motion is opposite-signed.
+                wrong_dir_x = (
+                    abs(hid_dx) > 5
+                    and abs(implied_dx) > 0.01
+                    and (hid_dx > 0) != (implied_dx > 0)
+                )
+                wrong_dir_y = (
+                    abs(hid_dy) > 5
+                    and abs(implied_dy) > 0.01
+                    and (hid_dy > 0) != (implied_dy > 0)
+                )
+                if wild_x or wild_y or wrong_dir_x or wrong_dir_y:
+                    print(
+                        f"  [{step:02d}|!] rejecting locator outlier: "
+                        f"hid=({hid_dx},{hid_dy}) "
+                        f"implied=({implied_dx:+.2%},{implied_dy:+.2%}) "
+                        f"expected=({expected_dx:+.2%},{expected_dy:+.2%})"
+                    )
+                    new_pos = None
+                    locator_tag = "·"
+
             if new_pos is not None:
                 measured_dx_pct = new_pos[0] - cursor_img[0]
                 measured_dy_pct = new_pos[1] - cursor_img[1]
