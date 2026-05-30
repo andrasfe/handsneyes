@@ -2911,7 +2911,24 @@ class VisualServoHomer:
                 continue
 
             new_cursor, blob_area = hit
+            pre_cursor_pos = cursor_img
             cursor_img = new_cursor
+
+            # Refine the chunked-mode pct-per-HID ratio from the
+            # observed motion. Same EMA update the legacy servo
+            # used — without this, _hid_for_residual systematically
+            # over-estimates how far the cursor will move per HID
+            # unit (on screen-share remote targets the chunked
+            # ratio is ~0.15‰, well below the DEFAULT_PCT_PER_HID
+            # = 0.833‰ seed), and closed-loop steps shrink by only
+            # ~12% per iteration instead of the design 55%. With
+            # refinement, residual halves every 1-2 steps once the
+            # ratio is calibrated.
+            self._refine_ratio(
+                hid_dx, hid_dy,
+                cursor_img[0] - pre_cursor_pos[0],
+                cursor_img[1] - pre_cursor_pos[1],
+            )
 
             # Push a tighter ROI. The new ROI bounds the aim and the
             # predicted next cursor position (where we expect to end
