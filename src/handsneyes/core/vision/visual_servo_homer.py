@@ -428,6 +428,14 @@ class VisualServoHomer:
         self._session = session
         self._pct_per_hid_x = DEFAULT_PCT_PER_HID
         self._pct_per_hid_y = DEFAULT_PCT_PER_HID
+        # Cruise-mode (fast-send) ratios. macOS pointer-accel
+        # responds to the burst-send pattern with a steeper curve
+        # than the chunked closed-loop path, so the ratio differs
+        # and must not pollute closed-loop's calibration. Seeded
+        # ~5× the closed-loop default; refined online from measured
+        # HSV deltas after each cruise step.
+        self._pct_per_hid_fast_x = DEFAULT_PCT_PER_HID * 5.0
+        self._pct_per_hid_fast_y = DEFAULT_PCT_PER_HID * 5.0
         self._diff_misses_in_a_row = 0
         self._zoom_levels_applied = 0
         # If init's HSV candidate fails motion verification, disable
@@ -766,33 +774,41 @@ class VisualServoHomer:
             # ~3.3 ms-per-HID-unit chunking AND skipping pre-capture
             # + settle + locator cascade per step.
             CRUISE_RESIDUAL_PCT = 0.20
-            CRUISE_SETTLE_S = 0.25
+            CRUISE_SETTLE_S = 0.22
             MAX_CRUISE_MISSES = 1
+            CRUISE_MAX_HID_PER_AXIS = MAX_HID_PER_AXIS
             if (
                 residual > CRUISE_RESIDUAL_PCT
                 and cruise_misses <= MAX_CRUISE_MISSES
             ):
-                # Chunked-send cruise (matches closed-loop's HID
-                # path → shared ratio, shared accel curve). The win
-                # vs closed-loop comes from skipping the per-step
-                # locator cascade (template-match + ROI diff +
-                # ratio refine + outlier reject + oscillation re-
-                # localize) — cruise does one capture + HSV motion-
-                # diff and either uses it or bails. Each cruise
-                # step sends MAX_HID_PER_AXIS per axis (vs closed-
-                # loop's STEP_DISTANCE_FRACTION-damped HID), so the
-                # cursor covers more ground per step too.
-                rx = max(RATIO_MIN, min(RATIO_MAX, self._pct_per_hid_x))
-                ry = max(RATIO_MIN, min(RATIO_MAX, self._pct_per_hid_y))
+                # Burst-send cruise via ``_send_hid_burst`` (one POST
+                # to the Pi, server-side chunking, no inter-chunk
+                # delay → ~50× fewer HTTP roundtrips than the
+                # chunked closed-loop path). macOS sees a single
+                # high-velocity event and applies its high-speed
+                # accel curve, so each HID unit moves significantly
+                # more screen than under chunked send. The fast
+                # path's accel response is calibrated through the
+                # separate ``_pct_per_hid_fast_*`` ratios so the
+                # closed-loop's chunked calibration isn't polluted.
+                FAST_RATIO_MAX = RATIO_MAX * 10
+                fr_x = max(
+                    RATIO_MIN,
+                    min(FAST_RATIO_MAX, self._pct_per_hid_fast_x),
+                )
+                fr_y = max(
+                    RATIO_MIN,
+                    min(FAST_RATIO_MAX, self._pct_per_hid_fast_y),
+                )
                 cruise_hid_dx = 0
                 cruise_hid_dy = 0
                 if abs(dx_pct) >= 1e-4:
-                    h = int(abs(dx_pct) / rx)
-                    h = max(MIN_HID_PER_AXIS, min(MAX_HID_PER_AXIS, h))
+                    h = int(abs(dx_pct) / fr_x)
+                    h = max(MIN_HID_PER_AXIS, min(CRUISE_MAX_HID_PER_AXIS, h))
                     cruise_hid_dx = h if dx_pct > 0 else -h
                 if abs(dy_pct) >= 1e-4:
-                    h = int(abs(dy_pct) / ry)
-                    h = max(MIN_HID_PER_AXIS, min(MAX_HID_PER_AXIS, h))
+                    h = int(abs(dy_pct) / fr_y)
+                    h = max(MIN_HID_PER_AXIS, min(CRUISE_MAX_HID_PER_AXIS, h))
                     cruise_hid_dy = h if dy_pct > 0 else -h
                 if axis_aligned:
                     if abs(dx_pct) > abs(dy_pct):
@@ -803,7 +819,7 @@ class VisualServoHomer:
                 t_cruise = time.monotonic()
                 pre_cursor = cursor_img
                 pre_color = await self._capture_color()
-                await self._send_hid(cruise_hid_dx, cruise_hid_dy)
+                await self._send_hid_burst(cruise_hid_dx, cruise_hid_dy)
                 await asyncio.sleep(CRUISE_SETTLE_S)
                 post_color = await self._capture_color()
                 new_hit = find_cursor_hsv_motion(pre_color, post_color)
@@ -815,16 +831,12 @@ class VisualServoHomer:
                 if measured:
                     cursor_img = (new_hit.x_pct, new_hit.y_pct)
                     cruise_misses = 0
-                    self._refine_ratio(
+                    self._refine_fast_ratio(
                         cruise_hid_dx, cruise_hid_dy,
                         cursor_img[0] - pre_cursor[0],
                         cursor_img[1] - pre_cursor[1],
                     )
                 else:
-                    # Don't extrapolate — closed-loop's full cascade
-                    # will re-localize on the next iteration. Bail
-                    # to closed-loop after the configured budget so
-                    # cruise can't ping-pong on a HSV-blind region.
                     cruise_misses += 1
 
                 self._last_cursor_pct = cursor_img
@@ -836,8 +848,8 @@ class VisualServoHomer:
                     f"cursor→({cursor_img[0]:.2%},{cursor_img[1]:.2%}) "
                     f"aim=({target_aim[0]:.2%},{target_aim[1]:.2%}) "
                     f"resid={residual:.2%} "
-                    f"r=({self._pct_per_hid_x*1000:.3f},"
-                    f"{self._pct_per_hid_y*1000:.3f})‰ "
+                    f"fr=({self._pct_per_hid_fast_x*1000:.3f},"
+                    f"{self._pct_per_hid_fast_y*1000:.3f})‰ "
                     f"{elapsed_c:.2f}s"
                 )
                 continue
@@ -2521,6 +2533,62 @@ class VisualServoHomer:
         if dx == 0 and dy == 0:
             return
         await self._session._send_hid_moves(dx, dy)
+
+    async def _send_hid_burst(self, dx: int, dy: int) -> None:
+        """Cruise-mode HID send. One round-trip to the Pi (via
+        ``mouse.move_large``) which splits into ±127 chunks
+        server-side and ships them back-to-back with no inter-
+        chunk delay. Order-of-magnitude faster than the chunked
+        closed-loop path on remote (USB-ECM / BT) transports
+        where per-chunk HTTP overhead dominates. Falls back to
+        the chunked path on backends that don't ship the burst
+        endpoint.
+        """
+        if dx == 0 and dy == 0:
+            return
+        mouse = getattr(self._session._ctx, "mouse", None)
+        if mouse is None:
+            return
+        try:
+            await mouse.move_large(dx, dy)
+        except Exception:
+            # Fall back to chunked send if Pi doesn't recognise
+            # the burst endpoint (older firmware).
+            await self._session._send_hid_moves(dx, dy)
+
+    def _refine_fast_ratio(
+        self,
+        hid_dx: int, hid_dy: int,
+        measured_dx_pct: float, measured_dy_pct: float,
+    ) -> None:
+        """EMA-update ``_pct_per_hid_fast_*`` from observed cruise
+        deltas. Same direction/magnitude guards as ``_refine_ratio``
+        but writes the cruise-specific ratios so the chunked closed-
+        loop calibration stays untouched.
+        """
+        FAST_RATIO_MAX = RATIO_MAX * 10
+        for hid, meas, axis in (
+            (hid_dx, measured_dx_pct, "x"),
+            (hid_dy, measured_dy_pct, "y"),
+        ):
+            if abs(hid) < MIN_HID_PER_AXIS or meas == 0:
+                continue
+            if (hid > 0) != (meas > 0):
+                continue
+            current = (self._pct_per_hid_fast_x if axis == "x"
+                       else self._pct_per_hid_fast_y)
+            expected = abs(hid) * current
+            if abs(meas) < 0.05 * expected:
+                continue
+            obs = abs(meas) / abs(hid)
+            if not (RATIO_MIN <= obs <= FAST_RATIO_MAX):
+                continue
+            new = RATIO_EMA * obs + (1 - RATIO_EMA) * current
+            new = max(RATIO_MIN, min(FAST_RATIO_MAX, new))
+            if axis == "x":
+                self._pct_per_hid_fast_x = new
+            else:
+                self._pct_per_hid_fast_y = new
 
     async def _capture_gray(self) -> np.ndarray:
         frame = await self._session._capture.capture_frame()

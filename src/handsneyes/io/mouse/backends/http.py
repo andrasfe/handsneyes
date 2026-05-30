@@ -96,6 +96,24 @@ class HttpMouseOutput(MouseOutput):
         """Send a relative mouse movement."""
         await self._post(f"{self._prefix}/move", {"x": dx, "y": dy})
 
+    async def move_large(self, dx: int, dy: int) -> None:
+        """Send a large relative mouse movement in a single POST.
+
+        Equivalent to many ``move()`` calls split into ±127 chunks
+        but performed Pi-side without per-chunk HTTP overhead. macOS
+        sees a single high-velocity burst, applies its high-speed
+        pointer-accel curve, and the cursor covers significantly
+        more screen per HID unit than the chunked path that goes
+        through MOVE_STEP_SIZE-throttled ``move()`` calls.
+
+        Used by cruise mode in the visual servo homer. Falls back
+        gracefully on backends that don't implement it (the base
+        class supplies a chunked default).
+        """
+        await self._post(
+            f"{self._prefix}/move_large", {"x": dx, "y": dy},
+        )
+
     async def click(self, button: str = "left") -> None:
         """Send a mouse button click."""
         await self._post(f"{self._prefix}/click", {"button": button})

@@ -325,6 +325,17 @@ def create_app(
     # that would otherwise dismiss any open menu / modal / popover.
     # Invalidated by any other mouse action.
     app.state.last_click_xy_at = None  # tuple[(x,y), epoch] | None
+    # Cache for the homer's learned pct-per-HID ratios. Each
+    # click_at creates a fresh VisualServoHomer, so without this
+    # cache the homer re-discovers the host's pointer-accel curve
+    # from scratch every click (DEFAULT seed is typically 5–10×
+    # off the real ratio for screen-share remote targets). With
+    # the cache, the first click calibrates and every later click
+    # within the session starts already-calibrated. tuple[
+    # (ratio_x, ratio_y), epoch] | None — same TTL as
+    # last_click_xy_at since the ratio is host-specific and a
+    # long gap probably means the target/display config changed.
+    app.state.last_homer_ratio_at = None
 
     # Homer-retrain state. n_trajectories_since_train is incremented
     # after every successful click_at — each click writes a fresh
@@ -995,6 +1006,10 @@ def create_app(
                 # every click_at re-slams to the corner, which
                 # dismisses transient UI like LibreOffice's menus.
                 NO_SLAM_CACHE_TTL_S = 30.0
+                # Same TTL for the homer's learned pct-per-HID ratio
+                # — host-specific calibration that survives across
+                # consecutive click_at calls.
+                RATIO_CACHE_TTL_S = 300.0
                 import time as _time
                 prev_cursor_pct = None
                 cached = app.state.last_click_xy_at
@@ -1002,6 +1017,20 @@ def create_app(
                     cached_xy, cached_t = cached
                     if _time.time() - cached_t < NO_SLAM_CACHE_TTL_S:
                         prev_cursor_pct = cached_xy
+                # Seed the homer's pct-per-HID ratios from the
+                # previous click's learned values, if recent. Cuts
+                # the closed-loop's ratio-discovery phase (~5–10
+                # steps of overshoot + EMA refinement against the
+                # DEFAULT seed) on every subsequent click within
+                # the session.
+                cached_ratio = app.state.last_homer_ratio_at
+                if cached_ratio is not None:
+                    (rx, ry, fx, fy), rt = cached_ratio
+                    if _time.time() - rt < RATIO_CACHE_TTL_S:
+                        homer._pct_per_hid_x = rx
+                        homer._pct_per_hid_y = ry
+                        homer._pct_per_hid_fast_x = fx
+                        homer._pct_per_hid_fast_y = fy
                 outcome = await homer.home_to_pixel(
                     req.x_pct, req.y_pct, button=req.button,
                     prev_cursor_pct=prev_cursor_pct,
@@ -1015,6 +1044,20 @@ def create_app(
                     app.state.last_scroll_home_xy = (req.x_pct, req.y_pct)
                     app.state.last_click_xy_at = (
                         (req.x_pct, req.y_pct), _time.time(),
+                    )
+                    # Persist the homer's converged pct-per-HID
+                    # ratios (both closed-loop AND fast-cruise) so
+                    # the NEXT click starts already-calibrated
+                    # instead of EMA-converging from DEFAULT all
+                    # over again.
+                    app.state.last_homer_ratio_at = (
+                        (
+                            homer._pct_per_hid_x,
+                            homer._pct_per_hid_y,
+                            homer._pct_per_hid_fast_x,
+                            homer._pct_per_hid_fast_y,
+                        ),
+                        _time.time(),
                     )
                     # Every successful click produced a fresh
                     # history.jsonl trajectory — a new training row

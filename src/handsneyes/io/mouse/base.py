@@ -56,6 +56,21 @@ class MouseOutput(ABC):
         """
         ...
 
+    async def move_large(self, dx: int, dy: int) -> None:
+        """Default fallback: chunked ``move()`` for backends without
+        a native batch path. Override on transports that can ship a
+        large delta in one round-trip (HTTP backend has a dedicated
+        Pi endpoint that splits server-side).
+        """
+        rem_x, rem_y = dx, dy
+        while rem_x != 0 or rem_y != 0:
+            sx = max(-127, min(127, rem_x))
+            sy = max(-127, min(127, rem_y))
+            if sx != 0 or sy != 0:
+                await self.move(sx, sy)
+            rem_x -= sx
+            rem_y -= sy
+
     @abstractmethod
     async def click(self, button: str = "left") -> None:
         """Send a mouse button click (press + release).
