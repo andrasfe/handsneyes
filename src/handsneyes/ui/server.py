@@ -1034,6 +1034,7 @@ def create_app(
                 outcome = await homer.home_to_pixel(
                     req.x_pct, req.y_pct, button=req.button,
                     prev_cursor_pct=prev_cursor_pct,
+                    click_count=req.count,
                 )
                 # click_at successfully landed the cursor at this
                 # pixel — update the scroll-home cache so the next
@@ -1063,23 +1064,14 @@ def create_app(
                     # history.jsonl trajectory — a new training row
                     # for the homer's retrain pipeline.
                     app.state.n_trajectories_since_train += 1
-                    # Multi-click: the homer already fired one click
-                    # as part of landing. Send the extras in-place
-                    # (no movement between) so the OS sees them as a
-                    # genuine double / triple click. 80 ms gap keeps
-                    # us inside macOS's ~250 ms double-click window
-                    # while leaving enough time for the BT HID report
-                    # to land cleanly.
-                    for _ in range(1, req.count):
-                        await asyncio.sleep(0.08)
-                        try:
-                            await mouse.click(req.button)
-                        except Exception as e:
-                            logger.warning(
-                                "extra click in count=%d failed: %s",
-                                req.count, e,
-                            )
-                            break
+                    # Multi-click: the homer fired all clicks back-
+                    # to-back inside its geometric-confirm block,
+                    # BEFORE the 0.4 s proof sleep — so macOS sees
+                    # them inside the double-click window (~250 ms).
+                    # If we fired the extras here instead, the proof
+                    # sleep would split the gap past the threshold
+                    # and macOS would register independent single
+                    # clicks instead of a double.
                 # Drop a post-click frame at the watch-dir top level
                 # so FrameStore (one-level-deep scan) picks it up and
                 # the UI long-poll refreshes.

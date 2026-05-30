@@ -676,6 +676,8 @@ class VisualServoHomer:
         click_tol_pct: float = CLICK_TOL_PCT,
         click: bool = True,
         axis_aligned: bool = False,
+        dragging: bool = False,
+        click_count: int = 1,
     ) -> ClickOutcome:
         """Run the visual-servo loop until cursor lands on target_aim.
 
@@ -741,6 +743,13 @@ class VisualServoHomer:
         # bails to the closed-loop path (with its full cursor-finder
         # cascade) rather than extrapolating off into the void.
         cruise_misses = 0
+        # Detect ping-pong where the wiggle detector keeps returning
+        # a stable false-positive at the same point: residual doesn't
+        # change between consecutive cruise steps → bail to closed-
+        # loop. Without this, false positives reset cruise_misses=0
+        # and the loop never exits.
+        cruise_last_residual: float | None = None
+        cruise_stuck_count = 0
         for step in range(1, max_steps_dynamic + 1):
             t_step = time.monotonic()
 
@@ -785,6 +794,7 @@ class VisualServoHomer:
             if (
                 residual > CRUISE_RESIDUAL_PCT
                 and cruise_misses <= MAX_CRUISE_MISSES
+                and cruise_stuck_count < 2
             ):
                 # Burst-send cruise via ``_send_hid_burst`` (one POST
                 # to the Pi, server-side chunking, no inter-chunk
@@ -837,79 +847,100 @@ class VisualServoHomer:
                 await self._send_hid_burst(cruise_hid_dx, cruise_hid_dy)
                 await asyncio.sleep(CRUISE_BURST_SETTLE_S)
 
-                # ─── Step 2: pre-wiggle capture ─────────────────
-                # Cursor is now stationary (burst settled). The
-                # wiggle's pre-frame captures it at rest.
-                pre_wiggle = await self._capture_gray()
-
-                # ─── Step 3: known small chunked wiggle ─────────
-                # A slow chunked move (no encoder smear, cursor
-                # red survives) by a known small delta. We KNOW
-                # the wiggle's expected pixel delta because the
-                # closed-loop ratio is calibrated. Frame-diff
-                # between pre-wiggle and post-wiggle finds the
-                # cursor as the ONE blob that moved by exactly
-                # the expected vector — color-agnostic, so
-                # encoder colour shifts don't matter.
-                wiggle_dx_pct = (
-                    CRUISE_WIGGLE_HID * self._pct_per_hid_x
-                )
-                wiggle_dy_pct = (
-                    CRUISE_WIGGLE_HID * self._pct_per_hid_y
-                )
-                await self._send_hid(
-                    CRUISE_WIGGLE_HID, CRUISE_WIGGLE_HID,
-                )
-                await asyncio.sleep(CRUISE_WIGGLE_SETTLE_S)
-                post_wiggle = await self._capture_gray()
-
-                # ─── Step 4: find the cursor via wiggle wake ───
-                # Predict where post-wiggle cursor SHOULD be:
-                # pre-burst position + burst delta (using current
-                # fast-ratio estimate) + wiggle delta. The
-                # frame-diff detector scores candidate blobs by
-                # distance to this prediction.
-                predicted_post_burst = (
-                    pre_cursor[0] + cruise_hid_dx * fr_x,
-                    pre_cursor[1] + cruise_hid_dy * fr_y,
-                )
-                predicted_post_wiggle = (
-                    predicted_post_burst[0] + wiggle_dx_pct,
-                    predicted_post_burst[1] + wiggle_dy_pct,
-                )
-                new_pos, _ = self._detect_cursor_motion(
-                    pre_wiggle, post_wiggle,
-                    expected_dx_pct=wiggle_dx_pct,
-                    expected_dy_pct=wiggle_dy_pct,
-                    last_known=predicted_post_burst,
-                )
-
-                # ─── Step 5: undo the wiggle ────────────────────
-                # Cursor returns to post-burst position.
-                await self._send_hid(
-                    -CRUISE_WIGGLE_HID, -CRUISE_WIGGLE_HID,
-                )
-
-                measured = new_pos is not None
-                if measured:
-                    # Subtract the wiggle delta to recover the
-                    # post-burst landing point — that's where the
-                    # cursor is NOW (the wiggle was just
-                    # undone).
+                if dragging:
+                    # DRAG MODE — the mouse button is held down,
+                    # so ANY motion between press and release is
+                    # part of the user's selection. A wiggle would
+                    # corrupt the selection (highlighting extra
+                    # text or dragging through unwanted regions).
+                    # Skip the wiggle entirely and trust the open-
+                    # loop extrapolation; the closed-loop tail
+                    # will re-measure with full cascade.
                     cursor_img = (
-                        new_pos[0] - wiggle_dx_pct,
-                        new_pos[1] - wiggle_dy_pct,
+                        pre_cursor[0] + cruise_hid_dx * fr_x,
+                        pre_cursor[1] + cruise_hid_dy * fr_y,
                     )
-                    cruise_misses = 0
-                    # Refine fast-mode ratio from observed burst
-                    # delta (post_burst_cursor - pre_burst_cursor).
-                    self._refine_fast_ratio(
-                        cruise_hid_dx, cruise_hid_dy,
-                        cursor_img[0] - pre_cursor[0],
-                        cursor_img[1] - pre_cursor[1],
+                    # Cap extrapolation to viewport so a wildly
+                    # wrong fr can't push cursor_img off-screen.
+                    cursor_img = (
+                        max(0.0, min(1.0, cursor_img[0])),
+                        max(0.0, min(1.0, cursor_img[1])),
                     )
+                    measured = False  # mark as extrapolation
+                    cruise_misses += 1  # bail to closed-loop after 1 burst
                 else:
-                    cruise_misses += 1
+                    # ─── Step 2: pre-wiggle capture ─────────────────
+                    # Cursor is now stationary (burst settled). The
+                    # wiggle's pre-frame captures it at rest.
+                    pre_wiggle = await self._capture_gray()
+
+                    # ─── Step 3: known small chunked wiggle ─────────
+                    # A slow chunked move (no encoder smear, cursor
+                    # red survives) by a known small delta. Frame-
+                    # diff between pre and post finds the cursor as
+                    # the ONE blob that moved by exactly the wiggle
+                    # vector — colour-agnostic.
+                    wiggle_dx_pct = (
+                        CRUISE_WIGGLE_HID * self._pct_per_hid_x
+                    )
+                    wiggle_dy_pct = (
+                        CRUISE_WIGGLE_HID * self._pct_per_hid_y
+                    )
+                    await self._send_hid(
+                        CRUISE_WIGGLE_HID, CRUISE_WIGGLE_HID,
+                    )
+                    await asyncio.sleep(CRUISE_WIGGLE_SETTLE_S)
+                    post_wiggle = await self._capture_gray()
+
+                    # ─── Step 4: find the cursor via wiggle wake ───
+                    predicted_post_burst = (
+                        pre_cursor[0] + cruise_hid_dx * fr_x,
+                        pre_cursor[1] + cruise_hid_dy * fr_y,
+                    )
+                    new_pos, _ = self._detect_cursor_motion(
+                        pre_wiggle, post_wiggle,
+                        expected_dx_pct=wiggle_dx_pct,
+                        expected_dy_pct=wiggle_dy_pct,
+                        last_known=predicted_post_burst,
+                    )
+
+                    # ─── Step 5: undo the wiggle ────────────────────
+                    await self._send_hid(
+                        -CRUISE_WIGGLE_HID, -CRUISE_WIGGLE_HID,
+                    )
+
+                    measured = new_pos is not None
+                    if measured:
+                        cursor_img = (
+                            new_pos[0] - wiggle_dx_pct,
+                            new_pos[1] - wiggle_dy_pct,
+                        )
+                        cruise_misses = 0
+                        self._refine_fast_ratio(
+                            cruise_hid_dx, cruise_hid_dy,
+                            cursor_img[0] - pre_cursor[0],
+                            cursor_img[1] - pre_cursor[1],
+                        )
+                    else:
+                        cruise_misses += 1
+
+                # Ping-pong detector: if the new residual is within
+                # 0.5% of the prior cruise residual, the wiggle is
+                # locking onto a stable false-positive (or the burst
+                # didn't move the cursor at all). Two consecutive
+                # such steps → bail to closed-loop's full cascade.
+                new_resid = math.hypot(
+                    target_aim[0] - cursor_img[0],
+                    target_aim[1] - cursor_img[1],
+                )
+                if (
+                    cruise_last_residual is not None
+                    and abs(new_resid - cruise_last_residual) < 0.005
+                ):
+                    cruise_stuck_count += 1
+                else:
+                    cruise_stuck_count = 0
+                cruise_last_residual = new_resid
 
                 self._last_cursor_pct = cursor_img
                 elapsed_c = time.monotonic() - t_cruise
@@ -944,6 +975,20 @@ class VisualServoHomer:
                         # capture proof, return success.
                         if click:
                             await self._session._executor._mouse.click(button)
+                            # Multi-click: fire the extras BEFORE
+                            # the 0.4 s proof sleep so all clicks
+                            # land inside macOS's double-click
+                            # window (~250 ms). Without this the
+                            # proof sleep splits the gap past the
+                            # threshold and macOS sees independent
+                            # single clicks instead of a double /
+                            # triple.
+                            for _ in range(1, click_count):
+                                await asyncio.sleep(0.08)
+                                try:
+                                    await self._session._executor._mouse.click(button)
+                                except Exception:
+                                    break
                         try:
                             await asyncio.sleep(0.4)
                             proof = await self._capture_proof(
@@ -1662,6 +1707,8 @@ class VisualServoHomer:
         hotspot_offset: bool = True,
         click: bool = True,
         prev_cursor_pct: tuple[float, float] | None = None,
+        dragging: bool = False,
+        click_count: int = 1,
     ) -> ClickOutcome:
         """Home the cursor to a pre-located pixel on the webcam frame.
 
@@ -1892,6 +1939,8 @@ class VisualServoHomer:
             click_tol_pct=0.010,
             click=click,
             axis_aligned=(prev_cursor_pct is not None),
+            dragging=dragging,
+            click_count=click_count,
         )
 
     async def drag_to_pixels(
@@ -1930,6 +1979,7 @@ class VisualServoHomer:
                 to_x_pct, to_y_pct, button=button,
                 hotspot_offset=True, click=False,
                 prev_cursor_pct=(from_x_pct, from_y_pct),
+                dragging=True,
             )
         finally:
             # 4. Always release — leaving the button stuck down is
