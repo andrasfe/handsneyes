@@ -1981,15 +1981,15 @@ class VisualServoHomer:
             history=history, target_desc="<manual>",
             verify_navigation=False, last_proof=None,
             confirm_frames=1,
-            # 0.010 (1.0%) instead of the original 0.006: on cross-mac
-            # control through a screen-share virtual camera, the
-            # frame-diff locator's noise floor is comfortably above
-            # 0.6% — clicks that LOOK precise to the operator (cursor
-            # visibly on the target) report residuals like 0.77%,
-            # never trigger the geometric confirm, and the run ends
-            # NOT clicking. 1% = ~19 px on a 1920-wide frame, still
-            # tighter than any button you'd want to click.
-            click_tol_pct=0.010,
+            # 0.006 (0.6%) — tighter than the legacy 0.010. The
+            # ROI servo's per-step is cheap and ratio-refined, so
+            # the few extra small-step iterations needed to drive
+            # residual below 0.6% are basically free wall-time-wise.
+            # 0.6% on 1920w ≈ 11 px ≈ ~3 mm on a 27" 1080p display.
+            # Final click error is then dominated by the hotspot
+            # offset calibration variance (~0.5-1% session-to-
+            # session) rather than the servo loop.
+            click_tol_pct=0.006,
             click=click,
             axis_aligned=(prev_cursor_pct is not None),
             dragging=dragging,
@@ -3064,13 +3064,14 @@ class VisualServoHomer:
         that anchor over many clicks rather than replacing it on
         a single noisy sample.
 
-        Rejects measurements where |delta| > REJECT_DELTA_PCT (8%)
-        — those are almost certainly false positives (the cursor's
-        centroid-to-hotspot distance is rarely that large in
-        practice; the slam-corner numbers we've measured live
-        between 0.5% and 3%).
+        Rejects measurements where |delta| > REJECT_DELTA_PCT
+        (2.5%) — those are almost certainly false positives. The
+        cursor's centroid-to-hotspot distance lives between 0.5%
+        and 2% in practice (verified against multiple slam-corner
+        calibrations), so a 4-5% delta means the diff caught an
+        unrelated UI change rather than the click's visible effect.
         """
-        REJECT_DELTA_PCT = 0.08
+        REJECT_DELTA_PCT = 0.025
         if (abs(feedback_delta[0]) > REJECT_DELTA_PCT
                 or abs(feedback_delta[1]) > REJECT_DELTA_PCT):
             return False
@@ -3342,103 +3343,110 @@ class VisualServoHomer:
         to-centroid offset is — exactly the quantity we need to
         compensate for in every click.
 
-        Procedure:
-          1. Cursor is already at the corner (caller just slammed).
+        Per-attempt procedure:
+          1. Cursor is at corner (caller just slammed).
           2. Capture pre-frame.
-          3. Send a small known nudge (+60 / +60 HID) — cursor moves
-             diagonally into the screen.
+          3. Send a known nudge (+60 / +60 HID).
           4. Capture post-frame.
-          5. abs-diff(pre, post). Two cursor positions show as diff
-             blobs: pre-position (near corner) and post-position
-             (~60 HID inward).
-          6. The blob NEAREST the origin is the cursor at the corner.
-             Its centroid IS the hotspot offset for whatever cursor
-             shape macOS is currently rendering.
-          7. Restore the cursor to the corner with -60 / -60 so the
-             rest of the homer's setup (the +40 nudge it does
-             afterwards) starts from a known origin.
+          5. abs-diff(pre, post). Two cursor blobs appear: the pre-
+             position (near corner) and the post-position.
+          6. The blob NEAREST origin is the cursor at the corner.
+             Its centroid is the hotspot offset.
+          7. Restore cursor to corner with -60 / -60.
 
-        Robust to any cursor shape — arrow, I-beam, hand, crosshair —
-        because we measure the actual sprite extent, not assume one.
-        Falls back to the static HOTSPOT_OFFSET_*_PCT constants if
-        diff detection fails (e.g. encoder noise too high to isolate
-        the cursor blob).
+        Runs the procedure THREE times and takes the median per
+        axis. Single-shot measurements are noisy — observed
+        variance across consecutive runs on the same setup was
+        (0.19%, 0.75%) vs (1.10%, 2.36%) vs (1.09%, 2.35%), and
+        the median is robust to one outlier without needing to
+        understand WHY the outlier occurred (encoder hiccup,
+        async camera vs HID timing, low-contrast cursor against
+        a noisy background). Takes ~1.5s total for the calibration
+        — paid once per session.
         """
+        N_ATTEMPTS = 3
         NUDGE_HID = 60
-        try:
-            pre = await self._capture_gray()
-            await self._send_hid(NUDGE_HID, NUDGE_HID)
-            await asyncio.sleep(0.25)
-            post = await self._capture_gray()
-            await self._send_hid(-NUDGE_HID, -NUDGE_HID)
-            await asyncio.sleep(0.15)
+        measurements: list[tuple[float, float, float]] = []  # (hx, hy, area)
+        for attempt in range(N_ATTEMPTS):
+            try:
+                pre = await self._capture_gray()
+                await self._send_hid(NUDGE_HID, NUDGE_HID)
+                await asyncio.sleep(0.25)
+                post = await self._capture_gray()
+                await self._send_hid(-NUDGE_HID, -NUDGE_HID)
+                await asyncio.sleep(0.15)
 
-            diff = cv2.absdiff(pre, post)
-            _, mask = cv2.threshold(diff, 8, 255, cv2.THRESH_BINARY)
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-            mask = cv2.morphologyEx(
-                mask,
-                cv2.MORPH_CLOSE,
-                cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
-            )
-
-            contours, _ = cv2.findContours(
-                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
-            )
-            h, w = pre.shape[:2]
-            img_area = h * w
-            best = None  # (distance_from_origin, cx_pct, cy_pct, area_pct)
-            for c in contours:
-                a = cv2.contourArea(c)
-                # Reject noise specks and giant moving regions (page
-                # repaint, encoder banding).
-                if a < img_area * 0.00005 or a > img_area * 0.02:
-                    continue
-                M = cv2.moments(c)
-                if M["m00"] == 0:
-                    continue
-                cx = M["m10"] / M["m00"] / w
-                cy = M["m01"] / M["m00"] / h
-                # The PRE blob — cursor at corner — is the one
-                # closest to (0, 0). The POST blob will be at
-                # roughly (60_hid * ratio, 60_hid * ratio) inward.
-                d = math.hypot(cx, cy)
-                if best is None or d < best[0]:
-                    best = (d, cx, cy, a / img_area)
-
-            if best is None:
-                print(
-                    "  Hotspot calibration: no diff blobs — "
-                    "falling back to static HOTSPOT_OFFSET constants."
+                diff = cv2.absdiff(pre, post)
+                _, mask = cv2.threshold(diff, 8, 255, cv2.THRESH_BINARY)
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+                mask = cv2.morphologyEx(
+                    mask,
+                    cv2.MORPH_CLOSE,
+                    cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
                 )
-                return
 
-            _, hx, hy, area = best
-            # Sanity: the cursor blob at the corner should be in the
-            # upper-left ~quarter of the screen. If "nearest origin"
-            # is somewhere far away, the diff caught something else
-            # (background animation, blinking caret, etc.) — don't
-            # trust it.
-            if hx > 0.25 or hy > 0.25:
-                print(
-                    f"  Hotspot calibration: nearest-origin blob at "
-                    f"({hx:.2%},{hy:.2%}) is too far from corner — "
-                    f"falling back to static constants."
+                contours, _ = cv2.findContours(
+                    mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
                 )
-                return
+                h, w = pre.shape[:2]
+                img_area = h * w
+                best = None
+                for c in contours:
+                    a = cv2.contourArea(c)
+                    if a < img_area * 0.00005 or a > img_area * 0.02:
+                        continue
+                    M = cv2.moments(c)
+                    if M["m00"] == 0:
+                        continue
+                    cx = M["m10"] / M["m00"] / w
+                    cy = M["m01"] / M["m00"] / h
+                    d = math.hypot(cx, cy)
+                    if best is None or d < best[0]:
+                        best = (d, cx, cy, a / img_area)
 
-            self._calibrated_hotspot_offset = (hx, hy)
-            # Also record cursor area for any downstream code that
-            # uses the area-derived estimate.
-            self._cursor_area_pct = area
+                if best is None:
+                    continue
+                _, hx, hy, area = best
+                # The nearest-origin blob must actually be near the
+                # origin. The cursor at the corner sits ~half-cursor
+                # inside the visible region, so realistic bounds are
+                # well under 10%.
+                if hx > 0.10 or hy > 0.10:
+                    continue
+                measurements.append((hx, hy, area))
+            except Exception:
+                continue
+
+        if not measurements:
             print(
-                f"  Hotspot offset calibrated at corner: "
-                f"({hx:.2%}, {hy:.2%}) — cursor area {area*100:.3f}% "
-                f"of frame."
+                "  Hotspot calibration: no usable measurements after "
+                f"{N_ATTEMPTS} attempts — falling back to static "
+                f"HOTSPOT_OFFSET_*_PCT constants."
             )
-        except Exception as e:
-            print(f"  Hotspot calibration skipped: {e}")
+            return
+
+        # Per-axis median is robust to a single outlier (e.g. one
+        # attempt where the cursor barely moved and the "nearest
+        # origin" was the corner itself rather than the cursor).
+        xs = sorted(m[0] for m in measurements)
+        ys = sorted(m[1] for m in measurements)
+        areas = sorted(m[2] for m in measurements)
+        n = len(measurements)
+        med_x = xs[n // 2]
+        med_y = ys[n // 2]
+        med_area = areas[n // 2]
+
+        self._calibrated_hotspot_offset = (med_x, med_y)
+        self._cursor_area_pct = med_area
+        spread_x = xs[-1] - xs[0] if n > 1 else 0.0
+        spread_y = ys[-1] - ys[0] if n > 1 else 0.0
+        print(
+            f"  Hotspot offset calibrated at corner: "
+            f"({med_x:.2%}, {med_y:.2%}) — median of {n} attempts "
+            f"(spread x={spread_x:.2%}, y={spread_y:.2%}); "
+            f"cursor area {med_area*100:.3f}% of frame."
+        )
 
     def _hotspot_offset_pct(self) -> tuple[float, float]:
         """Adaptive hotspot offset based on the observed cursor size.
