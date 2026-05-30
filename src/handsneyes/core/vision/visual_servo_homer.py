@@ -2755,6 +2755,40 @@ class VisualServoHomer:
                     f"— confirm {confirm_count}/{confirm_frames}"
                 )
                 if confirm_count >= confirm_frames:
+                    # Post-confirm verification: the previous step's
+                    # measurement said residual ≤ tol, but single-
+                    # frame frame-diff jitters ±0.5% — the true
+                    # cursor position could be up to ~0.5% further
+                    # off. Re-measure via a tiny wiggle (~15 HID,
+                    # undone) for a fresh independent reading
+                    # before clicking. If the fresh reading puts
+                    # residual back above tol, the previous reading
+                    # was a noisy under-estimate; resume servoing
+                    # rather than click off-target.
+                    verified = await self._verify_cursor_via_wiggle(cursor_img)
+                    if verified is not None:
+                        v_resid = math.hypot(
+                            target_aim[0] - verified[0],
+                            target_aim[1] - verified[1],
+                        )
+                        if v_resid > click_tol_pct:
+                            cursor_img = verified
+                            confirm_count = 0
+                            print(
+                                f"  [{step:02d}|V] post-confirm "
+                                f"re-measure: cursor=({verified[0]:.2%},"
+                                f"{verified[1]:.2%}) residual={v_resid:.2%}"
+                                f" > {click_tol_pct:.1%} — resuming"
+                            )
+                            continue
+                        cursor_img = verified
+                        print(
+                            f"  [{step:02d}|V] verified: cursor=({verified[0]:.2%},"
+                            f"{verified[1]:.2%}) residual={v_resid:.2%}"
+                            f" ≤ {click_tol_pct:.1%} — clicking"
+                        )
+                    # else: wiggle couldn't localise (busy bg) —
+                    # fall through to click with prior cursor_img.
                     return await self._roi_commit_click(
                         target_aim=target_aim, target_img=target_img,
                         cursor_img=cursor_img, button=button,
@@ -2971,6 +3005,72 @@ class VisualServoHomer:
             click=click, click_count=click_count,
             run_dir=run_dir, step=MAX_STEPS_ROI, history=history,
             best_effort=True,
+        )
+
+    async def _verify_cursor_via_wiggle(
+        self, last_cursor: tuple[float, float],
+        search_pad: float = 0.05,
+    ) -> tuple[float, float] | None:
+        """Re-measure the cursor's exact position via a small known
+        wiggle just before committing the click.
+
+        Why: single-frame frame-diff jitters ±0.5% on a screen-share
+        remote target. If the cursor's true residual is 1.4% but a
+        noisy measurement reported 0.9%, the tolerance gate fires
+        and we click 1.4% off target. Replacing the cursor estimate
+        with a fresh wiggle-localised measurement averages that
+        single-frame noise out: the wiggle's pre/post pair gives a
+        differential signal independent of which frame caught the
+        noise spike.
+
+        Returns the cursor's *pre-wiggle* position (= post-undo
+        position — the cursor lands back where it started after the
+        wiggle is reversed). Returns None if the wiggle's diff
+        couldn't isolate the cursor (e.g. heavy background activity).
+        """
+        WIGGLE_HID = 15
+        WIGGLE_SETTLE_S = 0.12
+        try:
+            pre = await self._capture_gray()
+            await self._send_hid(WIGGLE_HID, WIGGLE_HID)
+            await asyncio.sleep(WIGGLE_SETTLE_S)
+            post = await self._capture_gray()
+            # Undo so the cursor returns to its pre-wiggle position
+            # — caller must not see any net cursor displacement.
+            await self._send_hid(-WIGGLE_HID, -WIGGLE_HID)
+        except Exception:
+            return None
+
+        # Expected wiggle delta in image-pct, using the homer's
+        # current chunked ratio (which has been refined throughout
+        # the servo loop, so it's well-calibrated by now).
+        expected_dx_pct = WIGGLE_HID * self._pct_per_hid_x
+        expected_dy_pct = WIGGLE_HID * self._pct_per_hid_y
+        predicted_post = (
+            last_cursor[0] + expected_dx_pct,
+            last_cursor[1] + expected_dy_pct,
+        )
+
+        # Tight ROI around the predicted post-wiggle position —
+        # we know the cursor is RIGHT THERE because the wiggle's
+        # only ~15 HID = ~2-3 px.
+        roi = (
+            max(0.0, predicted_post[0] - search_pad),
+            max(0.0, predicted_post[1] - search_pad),
+            min(2 * search_pad, 1.0),
+            min(2 * search_pad, 1.0),
+        )
+        hit = self._detect_cursor_in_roi(
+            pre, post, roi, near_pct=predicted_post,
+        )
+        if hit is None:
+            return None
+        post_cursor, _ = hit
+        # Convert post-wiggle measurement back to pre-wiggle
+        # position (= where the cursor sits NOW, after undo).
+        return (
+            post_cursor[0] - expected_dx_pct,
+            post_cursor[1] - expected_dy_pct,
         )
 
     def _measure_click_feedback_offset(
