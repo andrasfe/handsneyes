@@ -710,13 +710,15 @@ class VisualServoHomer:
         dragging: bool = False,
         click_count: int = 1,
     ) -> ClickOutcome:
-        # Opt-in ROI-stack servo. Same signature; replaces the
+        # ROI-stack visual servo (default). Replaces the
         # proportional-HID + cascade-detection inner loop with a
         # nested-rectangle visual servo (see _servo_loop_roi).
-        # Kept behind a flag so we can A/B against the legacy loop
-        # before deleting any code paths.
+        # Set HANDSNEYES_LEGACY_SERVO=1 to fall back to the legacy
+        # proportional-HID loop preserved below — kept for emergency
+        # rollback until enough run-time on the new path proves we
+        # can delete the legacy code in step 5 of the plan.
         import os
-        if os.environ.get("HANDSNEYES_ROI_SERVO") == "1":
+        if os.environ.get("HANDSNEYES_LEGACY_SERVO") != "1":
             return await self._servo_loop_roi(
                 target_aim=target_aim, target_img=target_img,
                 cursor_img=cursor_img, button=button, run_dir=run_dir,
