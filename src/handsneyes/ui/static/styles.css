@@ -170,6 +170,14 @@ body.col-resizing img { pointer-events: none; }
   object-fit: contain;
   display: block;
   cursor: crosshair;
+  /* Disable the browser's built-in image drag (ghost-image
+     dragging onto other windows / the desktop). Our drag flow
+     forwards the gesture to /api/mouse/drag on the host; the
+     native image drag would intercept it and the user's drag-
+     select on the host never fires. */
+  -webkit-user-drag: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 #frame.empty { display: none; }
 #frame.click-disabled { cursor: default; }

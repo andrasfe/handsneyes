@@ -1309,12 +1309,29 @@ $frame.addEventListener("mousedown", (e) => {
   const x = e.clientX - rect.left;
   const y = e.clientY - rect.top;
   if (x < 0 || y < 0 || x > rect.width || y > rect.height) return;
+  // The browser's default image-drag interaction (drag the <img> as
+  // a ghost, drop it elsewhere) competes with our custom drag-to-
+  // host-drag flow — without preventDefault here, the user starts
+  // a drag on the live frame and instead of forwarding the gesture
+  // to /api/mouse/drag, the browser ghosts the screenshot. Belt-
+  // and-braces with the draggable="false" attribute on the <img>
+  // and the `dragstart` listener below.
+  e.preventDefault();
   _mouseDownPos = {
     x_pct: Math.max(0, Math.min(1, x / rect.width)),
     y_pct: Math.max(0, Math.min(1, y / rect.height)),
     clientX: e.clientX, clientY: e.clientY,
   };
   _isDragging = false;
+});
+
+// Block the native HTML5 drag-and-drop on the live frame — covers
+// the case where the user's mousedown happens to start on a focused
+// or text-selected region of the page and the browser tries to
+// initiate a drag operation before our mousedown handler runs.
+$frame.addEventListener("dragstart", (e) => {
+  e.preventDefault();
+  return false;
 });
 
 // Mousemove + mouseup attach to window — a drag that started on the
