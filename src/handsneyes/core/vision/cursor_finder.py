@@ -489,7 +489,8 @@ def find_cursor_by_variance(
     variance_threshold: float = 8.0,
     min_active_pixels: int = 30,
     max_active_fraction: float = 0.05,
-) -> tuple[float, float] | None:
+    return_area: bool = False,
+) -> tuple[float, float] | tuple[float, float, float] | None:
     """Find the cursor by computing the centroid of all high-variance
     pixels across frames captured during cursor oscillation.
 
@@ -543,6 +544,19 @@ def find_cursor_by_variance(
         return None
     cx = M["m10"] / M["m00"]
     cy = M["m01"] / M["m00"]
+    if return_area:
+        # The variance mask covers EVERY position the cursor visited
+        # across the oscillation, so its pixel count is roughly
+        # N_positions × cursor_pixel_area. ``frames`` is 1 baseline +
+        # N oscillation snapshots, so divide by len(frames) - 1 to get
+        # back to a single-cursor footprint. Conservative: gives a
+        # slight under-estimate when the oscillation positions overlap
+        # (small jiggles on a big cursor), which keeps the derived
+        # hotspot offset just below the true centroid-to-tip distance
+        # rather than over-correcting past the click target.
+        n_pos = max(1, len(frames) - 1)
+        cursor_area_pct = active_pixels / (n_pos * img_area)
+        return cx / w, cy / h, cursor_area_pct
     return cx / w, cy / h
 
 

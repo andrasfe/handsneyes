@@ -428,6 +428,26 @@ class VisualServoHomer:
         self._session = session
         self._pct_per_hid_x = DEFAULT_PCT_PER_HID
         self._pct_per_hid_y = DEFAULT_PCT_PER_HID
+        # Observed cursor footprint, in image-area-percent. Updated
+        # whenever the HSV finder reports a valid CursorHit. Used to
+        # adaptively size the hotspot offset (the centroid-to-hotspot
+        # distance scales with cursor pixel size; a 32-px default
+        # cursor needs a ~0.5% offset, a 96-px high-contrast cursor
+        # needs ~3-5%). Without this, callers with a non-default
+        # cursor size see every click land down-left of where they
+        # clicked because the static HOTSPOT_OFFSET_*_PCT constants
+        # under-estimate the offset for any cursor larger than the
+        # default.
+        self._cursor_area_pct: float | None = None
+        # Hotspot offset calibrated by ``_calibrate_hotspot_at_corner``
+        # — measured precisely once per session by exploiting macOS's
+        # edge clamp (which clamps the cursor's HOTSPOT, not its
+        # centroid, at (0, 0)). When set, this is THE source of truth
+        # for the hotspot offset and overrides both the static
+        # HOTSPOT_OFFSET_*_PCT constants and the area-derived
+        # estimate. Works for any cursor shape (arrow, I-beam, hand,
+        # crosshair) without needing to recognise the shape.
+        self._calibrated_hotspot_offset: tuple[float, float] | None = None
         # Cruise-mode (fast-send) ratios. Seeded LOW (= chunked
         # default) so the first few cruise bursts hit the
         # CRUISE_MAX_HID cap. A capped burst moves the cursor far
@@ -529,7 +549,13 @@ class VisualServoHomer:
 
         # 1) Move cursor to a visible position via slam, then nudge
         # back into the screen so the cursor is not pinned in a
-        # corner where HSV may struggle near the edge.
+        # corner where HSV may struggle near the edge. BUT FIRST,
+        # while the cursor is still pinned at the corner, calibrate
+        # the hotspot offset (see _calibrate_hotspot_at_corner for
+        # the geometry): macOS clamps the cursor's HOTSPOT (not its
+        # centroid) at the screen edge, so the centroid we detect
+        # at the corner IS the hotspot-to-centroid vector for the
+        # current cursor shape.
         await self._slam_to_corner()
         await self._send_hid(40, 40)   # nudge ~40 px diagonally inward
         await asyncio.sleep(0.30)
@@ -549,6 +575,10 @@ class VisualServoHomer:
             if verified is not None:
                 cursor_img = verified
                 self._hsv_enabled = True
+                # Record the cursor's screen footprint so the hotspot
+                # offset adapts to whatever cursor size the host is
+                # actually using.
+                self._cursor_area_pct = cursor_hit.area_pct
                 print(
                     f"  Cursor (HSV verified): ({cursor_img[0]:.2%}, "
                     f"{cursor_img[1]:.2%}) area={cursor_hit.area_pct*100:.3f}%"
@@ -642,9 +672,10 @@ class VisualServoHomer:
             )
         # Apply hotspot offset: aim the cursor *centroid* slightly
         # past the link so the cursor *tip* lands on the link.
+        hx, hy = self._hotspot_offset_pct()
         target_aim = (
-            target_img[0] + HOTSPOT_OFFSET_X_PCT,
-            target_img[1] + HOTSPOT_OFFSET_Y_PCT,
+            target_img[0] + hx,
+            target_img[1] + hy,
         )
         print(
             f"  Target ≈ ({target_img[0]:.2%}, {target_img[1]:.2%}); "
@@ -1588,10 +1619,11 @@ class VisualServoHomer:
         )
         print(f"  Step log: {run_dir}/")
 
-        target_aim = (
-            x_pct + (HOTSPOT_OFFSET_X_PCT if hotspot_offset else 0.0),
-            y_pct + (HOTSPOT_OFFSET_Y_PCT if hotspot_offset else 0.0),
-        )
+        if hotspot_offset:
+            hx, hy = self._hotspot_offset_pct()
+        else:
+            hx = hy = 0.0
+        target_aim = (x_pct + hx, y_pct + hy)
 
         # Per-HID gain on macOS at hid=127. Stays in the file so the
         # canary and the homer don't drift apart — copy if you tune it
@@ -1887,9 +1919,10 @@ class VisualServoHomer:
 
         target_img = (float(x_pct), float(y_pct))
         if hotspot_offset:
+            hx, hy = self._hotspot_offset_pct()
             target_aim = (
-                target_img[0] + HOTSPOT_OFFSET_X_PCT,
-                target_img[1] + HOTSPOT_OFFSET_Y_PCT,
+                target_img[0] + hx,
+                target_img[1] + hy,
             )
         else:
             target_aim = target_img
@@ -2650,6 +2683,168 @@ class VisualServoHomer:
                 pass
             await asyncio.sleep(0.001)
         await asyncio.sleep(0.3)
+        # Auto-calibrate hotspot offset using the corner clamp.
+        # See _calibrate_hotspot_at_corner. Skipped if already
+        # calibrated this session (cheap idempotency).
+        if self._calibrated_hotspot_offset is None:
+            await self._calibrate_hotspot_at_corner()
+
+    async def _calibrate_hotspot_at_corner(self) -> None:
+        """Auto-calibrate the hotspot offset right after slam-to-
+        corner. macOS (and most OSes) clamp the cursor's HOTSPOT at
+        the screen edge, NOT its visible centroid. So the cursor
+        sprite extends down-right of (0, 0) by whatever its hotspot-
+        to-centroid offset is — exactly the quantity we need to
+        compensate for in every click.
+
+        Procedure:
+          1. Cursor is already at the corner (caller just slammed).
+          2. Capture pre-frame.
+          3. Send a small known nudge (+60 / +60 HID) — cursor moves
+             diagonally into the screen.
+          4. Capture post-frame.
+          5. abs-diff(pre, post). Two cursor positions show as diff
+             blobs: pre-position (near corner) and post-position
+             (~60 HID inward).
+          6. The blob NEAREST the origin is the cursor at the corner.
+             Its centroid IS the hotspot offset for whatever cursor
+             shape macOS is currently rendering.
+          7. Restore the cursor to the corner with -60 / -60 so the
+             rest of the homer's setup (the +40 nudge it does
+             afterwards) starts from a known origin.
+
+        Robust to any cursor shape — arrow, I-beam, hand, crosshair —
+        because we measure the actual sprite extent, not assume one.
+        Falls back to the static HOTSPOT_OFFSET_*_PCT constants if
+        diff detection fails (e.g. encoder noise too high to isolate
+        the cursor blob).
+        """
+        NUDGE_HID = 60
+        try:
+            pre = await self._capture_gray()
+            await self._send_hid(NUDGE_HID, NUDGE_HID)
+            await asyncio.sleep(0.25)
+            post = await self._capture_gray()
+            await self._send_hid(-NUDGE_HID, -NUDGE_HID)
+            await asyncio.sleep(0.15)
+
+            diff = cv2.absdiff(pre, post)
+            _, mask = cv2.threshold(diff, 8, 255, cv2.THRESH_BINARY)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            mask = cv2.morphologyEx(
+                mask,
+                cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
+            )
+
+            contours, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+            )
+            h, w = pre.shape[:2]
+            img_area = h * w
+            best = None  # (distance_from_origin, cx_pct, cy_pct, area_pct)
+            for c in contours:
+                a = cv2.contourArea(c)
+                # Reject noise specks and giant moving regions (page
+                # repaint, encoder banding).
+                if a < img_area * 0.00005 or a > img_area * 0.02:
+                    continue
+                M = cv2.moments(c)
+                if M["m00"] == 0:
+                    continue
+                cx = M["m10"] / M["m00"] / w
+                cy = M["m01"] / M["m00"] / h
+                # The PRE blob — cursor at corner — is the one
+                # closest to (0, 0). The POST blob will be at
+                # roughly (60_hid * ratio, 60_hid * ratio) inward.
+                d = math.hypot(cx, cy)
+                if best is None or d < best[0]:
+                    best = (d, cx, cy, a / img_area)
+
+            if best is None:
+                print(
+                    "  Hotspot calibration: no diff blobs — "
+                    "falling back to static HOTSPOT_OFFSET constants."
+                )
+                return
+
+            _, hx, hy, area = best
+            # Sanity: the cursor blob at the corner should be in the
+            # upper-left ~quarter of the screen. If "nearest origin"
+            # is somewhere far away, the diff caught something else
+            # (background animation, blinking caret, etc.) — don't
+            # trust it.
+            if hx > 0.25 or hy > 0.25:
+                print(
+                    f"  Hotspot calibration: nearest-origin blob at "
+                    f"({hx:.2%},{hy:.2%}) is too far from corner — "
+                    f"falling back to static constants."
+                )
+                return
+
+            self._calibrated_hotspot_offset = (hx, hy)
+            # Also record cursor area for any downstream code that
+            # uses the area-derived estimate.
+            self._cursor_area_pct = area
+            print(
+                f"  Hotspot offset calibrated at corner: "
+                f"({hx:.2%}, {hy:.2%}) — cursor area {area*100:.3f}% "
+                f"of frame."
+            )
+        except Exception as e:
+            print(f"  Hotspot calibration skipped: {e}")
+
+    def _hotspot_offset_pct(self) -> tuple[float, float]:
+        """Adaptive hotspot offset based on the observed cursor size.
+
+        For a cursor with area α (fraction of frame area) and aspect
+        ratio matching the frame's W:H, the cursor's bounding box is
+        ~sqrt(α · W/H) wide × sqrt(α · H/W) tall in frame-percent
+        units. The arrow's hotspot is at the tip (top-left of the
+        bounding box) while HSV detection centroids the visible
+        blob, so the click lands ~half the bounding box down-right
+        of the hotspot. Aiming the centroid (half_w, half_h) right
+        and down of the operator's target compensates exactly.
+
+        Returns the static HOTSPOT_OFFSET_*_PCT constants when no
+        cursor area has been observed yet (first iteration before
+        detection). For 1920×1080 frames with α=0.5%, this returns
+        roughly (4.7%, 2.7%) — matching a max-size high-contrast
+        cursor. For the default 32 px arrow (α≈0.05%) it returns
+        about (1.5%, 0.8%), close to the legacy constants.
+        """
+        # Prefer the corner-clamp calibration when it's available —
+        # it's measured directly from the running cursor shape and
+        # is dead-accurate. The area-derived estimate is the next
+        # best (works for any cursor shape but only approximates the
+        # hotspot location). Static constants are the last resort.
+        if self._calibrated_hotspot_offset is not None:
+            return self._calibrated_hotspot_offset
+        if self._cursor_area_pct is None:
+            return HOTSPOT_OFFSET_X_PCT, HOTSPOT_OFFSET_Y_PCT
+        # Use the frame's true aspect from session capture if
+        # available; else default to 16:9.
+        aspect = 1920.0 / 1080.0
+        try:
+            cap = self._session._capture
+            w = getattr(cap, "width", None)
+            h = getattr(cap, "height", None)
+            if w and h:
+                aspect = float(w) / float(h)
+        except Exception:
+            pass
+        area = max(0.0, self._cursor_area_pct)
+        # Half the bounding-box width / height in image-percent.
+        # Floor with the legacy constants so a tiny observed blob
+        # (probably a partial detection) doesn't reduce the offset
+        # below what the default cursor needs.
+        half_w = 0.5 * math.sqrt(area * aspect)
+        half_h = 0.5 * math.sqrt(area / aspect)
+        return (
+            max(HOTSPOT_OFFSET_X_PCT, half_w),
+            max(HOTSPOT_OFFSET_Y_PCT, half_h),
+        )
 
     async def _send_hid(self, dx: int, dy: int) -> None:
         if dx == 0 and dy == 0:
@@ -2816,8 +3011,20 @@ class VisualServoHomer:
                 frames,
                 variance_threshold=var_thr,
                 min_active_pixels=min_px,
+                return_area=True,
             )
             if result is not None:
+                # Record the oscillation-derived area so the
+                # adaptive hotspot offset works even when HSV's
+                # red threshold rejects the on-screen cursor (the
+                # common case on a screen-share remote target).
+                self._cursor_area_pct = result[2]
+                print(
+                    f"  Oscillation area: {result[2]*100:.3f}% of frame"
+                )
+                # Strip the area for downstream callers that expect
+                # the historical (x, y) tuple shape.
+                result = (result[0], result[1])
                 if idx > 0:
                     print(
                         f"  Cursor found by oscillation on attempt "

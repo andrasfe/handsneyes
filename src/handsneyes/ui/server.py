@@ -1025,12 +1025,20 @@ def create_app(
                 # the session.
                 cached_ratio = app.state.last_homer_ratio_at
                 if cached_ratio is not None:
-                    (rx, ry, fx, fy), rt = cached_ratio
+                    payload, rt = cached_ratio
                     if _time.time() - rt < RATIO_CACHE_TTL_S:
+                        # Backwards-compatible unpack: old caches
+                        # store 4-tuples (no hotspot); new caches
+                        # store 4 ratios + hotspot offset tuple.
+                        rx, ry, fx, fy = payload[:4]
                         homer._pct_per_hid_x = rx
                         homer._pct_per_hid_y = ry
                         homer._pct_per_hid_fast_x = fx
                         homer._pct_per_hid_fast_y = fy
+                        if len(payload) >= 6:
+                            homer._calibrated_hotspot_offset = (
+                                payload[4], payload[5],
+                            )
                 outcome = await homer.home_to_pixel(
                     req.x_pct, req.y_pct, button=req.button,
                     prev_cursor_pct=prev_cursor_pct,
@@ -1051,12 +1059,15 @@ def create_app(
                     # the NEXT click starts already-calibrated
                     # instead of EMA-converging from DEFAULT all
                     # over again.
+                    hsp = homer._calibrated_hotspot_offset
                     app.state.last_homer_ratio_at = (
                         (
                             homer._pct_per_hid_x,
                             homer._pct_per_hid_y,
                             homer._pct_per_hid_fast_x,
                             homer._pct_per_hid_fast_y,
+                        ) + (
+                            (hsp[0], hsp[1]) if hsp is not None else ()
                         ),
                         _time.time(),
                     )
