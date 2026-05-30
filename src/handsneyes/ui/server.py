@@ -2223,6 +2223,12 @@ def create_app(
             "active_run": active.public() if active else None,
             "screen_width": cfg.screen_width,
             "screen_height": cfg.screen_height,
+            # Expose the active target's platform so the SPA can
+            # default the platform-dropdown to it. Without this the
+            # dropdown always loads at its HTML default ("linux"),
+            # and Ctrl-letter shortcuts to a macOS target never get
+            # remapped to Cmd-letter — Ctrl-A would not select-all.
+            "active_platform": app.state.active_platform,
         })
 
     # ── homer retrain (online training) ──────────────────────────

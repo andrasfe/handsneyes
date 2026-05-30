@@ -58,6 +58,31 @@ const $optSelfCapture = document.getElementById("opt-self-capture");
 // click_at / run; in-flight runs are not affected.
 const $optAccelX = document.getElementById("opt-accel-x");
 const $optAccelY = document.getElementById("opt-accel-y");
+
+// Default the platform dropdown to the cc's active target platform.
+// Without this the dropdown is hardwired to "linux" in index.html;
+// when the active target is macos the Ctrl→Cmd remap in the
+// passthrough handler never fires, so Ctrl-letter shortcuts reach
+// the host as Ctrl-letter instead of Cmd-letter and don't trigger
+// the user's expected select-all / copy / paste / undo.
+(function _wirePlatformDefault() {
+  const $optPlatform = document.getElementById("opt-platform");
+  if (!$optPlatform) return;
+  fetch("/api/state")
+    .then(r => r.ok ? r.json() : null)
+    .then(j => {
+      if (!j || !j.active_platform) return;
+      // active_platform comes from the cc as a platform-plugin
+      // name (e.g. "macos", "linux_gnome"). The dropdown only has
+      // two options ("linux", "macos") so coerce anything containing
+      // "macos" to "macos", everything else to "linux".
+      const p = String(j.active_platform).toLowerCase();
+      const value = p.includes("mac") ? "macos" : "linux";
+      $optPlatform.value = value;
+    })
+    .catch(() => {});
+})();
+
 (function _wirePointerAccelScale() {
   if (!$optAccelX || !$optAccelY) return;
   fetch("/api/pointer-accel-scale")
@@ -1789,16 +1814,26 @@ function _physicalKeyFromCode(code) {
 
 function _passthroughHandleKey(e) {
   if (!$passInput) return;
-  // Compose mode: the operator is composing/correcting a command
-  // locally before committing it. Bail out completely so the browser
-  // handles typing + arrow keys + backspace natively. The 📤 Send
-  // button then forwards the full field as one text+Enter burst.
-  if (_isComposeMode()) return;
   // Let the browser handle navigation modifier-only events.
   if (e.key === "Shift" || e.key === "Control" || e.key === "Alt"
       || e.key === "Meta") {
     return;
   }
+  // Compose mode: the operator is composing/correcting a command
+  // locally before committing it. Bail out for PLAIN typing +
+  // arrow keys + backspace so the browser handles them on the
+  // local input. The 📤 Send button forwards the full field as
+  // one text+Enter burst.
+  //
+  // EXCEPTION: modifier+letter chords (Cmd-A, Ctrl-C, Cmd-V, Cmd-
+  // Z, ...) are commands targeting the HOST, not text edits to
+  // the local compose buffer. Forward them through even in
+  // compose mode — the user pressing Cmd-A while composing
+  // expects host's select-all to fire, not "select the local
+  // input's text". Shift alone doesn't count as a modifier here
+  // (Shift-letter is just uppercase).
+  const isModifierCombo = (e.ctrlKey || e.metaKey || e.altKey);
+  if (_isComposeMode() && !isModifierCombo) return;
   // First "real" keystroke without a prior click_at this session?
   // Surface the warning so the operator notices when host focus is
   // wrong and they're typing into the void.
