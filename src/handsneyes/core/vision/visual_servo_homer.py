@@ -2949,6 +2949,137 @@ class VisualServoHomer:
             best_effort=True,
         )
 
+    def _measure_click_feedback_offset(
+        self,
+        pre_color: np.ndarray, post_color: np.ndarray,
+        target_img: tuple[float, float],
+        target_aim: tuple[float, float],
+        search_radius_pct: float = 0.07,
+    ) -> tuple[float, float] | None:
+        """Find where a click visibly registered by frame-diffing
+        pre/post within a small ROI around the user's intended
+        target point, then return (delta_x_pct, delta_y_pct) from
+        the target.
+
+        Visible click effects include: text caret appearance/move,
+        button focus ring, link focus underline, app dock bounce,
+        menu open, hover-deselection. As long as SOMETHING changes
+        within ``search_radius_pct`` of the target, the diff finds
+        it. The largest changed region (closest to target if tied)
+        is the click feedback.
+
+        The cursor itself sits at ``target_aim`` (= target + current
+        hotspot offset) and may show small diff signature due to
+        encoder noise — usually smaller than the actual feedback
+        signature, so largest-blob picks the right one. When the
+        feedback is exactly on target, the returned delta is ~zero
+        and the caller leaves the hotspot offset unchanged.
+        """
+        if pre_color is None or post_color is None:
+            return None
+        if pre_color.shape != post_color.shape:
+            return None
+        h, w = pre_color.shape[:2]
+        cx = int(target_img[0] * w)
+        cy = int(target_img[1] * h)
+        rx = int(search_radius_pct * w)
+        ry = int(search_radius_pct * h)
+        x0 = max(0, cx - rx); y0 = max(0, cy - ry)
+        x1 = min(w, cx + rx); y1 = min(h, cy + ry)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        pre_g = cv2.cvtColor(pre_color[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+        post_g = cv2.cvtColor(post_color[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+        diff = cv2.absdiff(pre_g, post_g)
+        _, mask = cv2.threshold(diff, 15, 255, cv2.THRESH_BINARY)
+        kernel3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel3)
+        mask = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
+        )
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+        )
+        best = None  # (area, cx_pct, cy_pct)
+        for c in contours:
+            a = cv2.contourArea(c)
+            if a < 20:  # noise
+                continue
+            M = cv2.moments(c)
+            if M["m00"] == 0:
+                continue
+            bx = (x0 + M["m10"] / M["m00"]) / w
+            by = (y0 + M["m01"] / M["m00"]) / h
+            if best is None or a > best[0]:
+                best = (a, bx, by)
+        if best is None:
+            return None
+        _, fx, fy = best
+        return (fx - target_img[0], fy - target_img[1])
+
+    def _update_hotspot_from_feedback(
+        self,
+        target_img: tuple[float, float],
+        target_aim: tuple[float, float],
+        feedback_delta: tuple[float, float],
+        alpha: float = 0.15,
+    ) -> bool:
+        """Update the calibrated hotspot offset from observed click-
+        feedback delta. Returns True if the update was applied.
+
+        Derivation:
+            target_aim = target_img + H_used
+            click registers at: target_aim - H_true = target_img +
+              (H_used - H_true)
+            so feedback_delta = feedback_pos - target_img =
+              H_used - H_true
+            => H_true = H_used - feedback_delta
+
+        Conservative EMA (alpha=0.15) on top of the slam-corner
+        calibration: the click-feedback measurement is noisy
+        because the diff can also catch unrelated background
+        animations / blink carets / focus loss events. Slam-corner
+        gives a tight measurement; click-feedback refines around
+        that anchor over many clicks rather than replacing it on
+        a single noisy sample.
+
+        Rejects measurements where |delta| > REJECT_DELTA_PCT (8%)
+        — those are almost certainly false positives (the cursor's
+        centroid-to-hotspot distance is rarely that large in
+        practice; the slam-corner numbers we've measured live
+        between 0.5% and 3%).
+        """
+        REJECT_DELTA_PCT = 0.08
+        if (abs(feedback_delta[0]) > REJECT_DELTA_PCT
+                or abs(feedback_delta[1]) > REJECT_DELTA_PCT):
+            return False
+        H_used = (
+            target_aim[0] - target_img[0],
+            target_aim[1] - target_img[1],
+        )
+        # The "ideal" H suggested by THIS observation alone.
+        H_obs = (
+            H_used[0] - feedback_delta[0],
+            H_used[1] - feedback_delta[1],
+        )
+        # EMA blend toward the observation. With alpha=0.15, a
+        # single bad sample shifts the offset by at most ~1% even
+        # if its delta was the max-accepted 8%.
+        H_blend = (
+            alpha * H_obs[0] + (1 - alpha) * H_used[0],
+            alpha * H_obs[1] + (1 - alpha) * H_used[1],
+        )
+        # Sanity clamp: cursor hotspot shouldn't be more than ±10%
+        # from its centroid (10% on 1920w = ~190 px, a huge cursor).
+        H_blend = (
+            max(-0.10, min(0.10, H_blend[0])),
+            max(-0.10, min(0.10, H_blend[1])),
+        )
+        self._calibrated_hotspot_offset = H_blend
+        return True
+
     async def _roi_commit_click(
         self, *, target_aim, target_img, cursor_img, button, click,
         click_count, run_dir, step, history,
@@ -2960,7 +3091,13 @@ class VisualServoHomer:
         here so the ROI servo doesn't have to reimplement the count>1
         + proof-capture + history-record machinery.
         """
+        # Capture pre-click frame for click-feedback calibration.
+        pre_click_color: np.ndarray | None = None
         if click:
+            try:
+                pre_click_color = await self._capture_color()
+            except Exception:
+                pre_click_color = None
             await self._session._executor._mouse.click(button)
             for _ in range(1, click_count):
                 await asyncio.sleep(0.08)
@@ -2968,11 +3105,54 @@ class VisualServoHomer:
                     await self._session._executor._mouse.click(button)
                 except Exception:
                     break
+        post_click_color: np.ndarray | None = None
         try:
             await asyncio.sleep(0.4)
             proof = await self._capture_proof(run_dir, step * 100)
+            # _capture_proof persists the frame; grab a fresh capture
+            # too for the feedback diff (the proof file format may
+            # have been compressed/resized).
+            post_click_color = await self._capture_color()
         except Exception:
             proof = None
+
+        # Click-feedback hotspot calibration. Adjusts
+        # _calibrated_hotspot_offset based on where the click's
+        # visible effect appeared relative to the user's target.
+        # Skips silently if no feedback was detected (clicked on
+        # inert background).
+        if click and pre_click_color is not None and post_click_color is not None:
+            delta = self._measure_click_feedback_offset(
+                pre_click_color, post_click_color, target_img, target_aim,
+            )
+            if delta is not None:
+                prior = self._calibrated_hotspot_offset
+                applied = self._update_hotspot_from_feedback(
+                    target_img, target_aim, delta,
+                )
+                if applied:
+                    new = self._calibrated_hotspot_offset
+                    prior_str = (
+                        f"({prior[0]*100:.2f}%, {prior[1]*100:.2f}%)"
+                        if prior is not None else "(default)"
+                    )
+                    print(
+                        f"  [click-feedback] delta=({delta[0]*100:+.2f}%,"
+                        f"{delta[1]*100:+.2f}%) hotspot offset: "
+                        f"{prior_str} → ({new[0]*100:.2f}%, {new[1]*100:.2f}%)"
+                    )
+                else:
+                    print(
+                        f"  [click-feedback] delta=({delta[0]*100:+.2f}%,"
+                        f"{delta[1]*100:+.2f}%) — exceeds sanity threshold, "
+                        f"likely false positive (unrelated UI change). "
+                        f"Hotspot offset unchanged."
+                    )
+            else:
+                print(
+                    f"  [click-feedback] no visible change near "
+                    f"target — hotspot offset unchanged"
+                )
         residual = math.hypot(
             target_aim[0] - cursor_img[0], target_aim[1] - cursor_img[1],
         )
