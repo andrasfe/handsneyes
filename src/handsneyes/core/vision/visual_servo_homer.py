@@ -428,14 +428,17 @@ class VisualServoHomer:
         self._session = session
         self._pct_per_hid_x = DEFAULT_PCT_PER_HID
         self._pct_per_hid_y = DEFAULT_PCT_PER_HID
-        # Cruise-mode (fast-send) ratios. macOS pointer-accel
-        # responds to the burst-send pattern with a steeper curve
-        # than the chunked closed-loop path, so the ratio differs
-        # and must not pollute closed-loop's calibration. Seeded
-        # ~5× the closed-loop default; refined online from measured
-        # HSV deltas after each cruise step.
-        self._pct_per_hid_fast_x = DEFAULT_PCT_PER_HID * 5.0
-        self._pct_per_hid_fast_y = DEFAULT_PCT_PER_HID * 5.0
+        # Cruise-mode (fast-send) ratios. Seeded LOW (= chunked
+        # default) so the first few cruise bursts hit the
+        # CRUISE_MAX_HID cap. A capped burst moves the cursor far
+        # enough on screen that find_cursor_hsv_motion gets a
+        # robust differential signal (a tiny burst's pre/post
+        # frames are nearly identical and the motion-diff blob is
+        # too small to meet area filters). HSV-measured deltas
+        # then EMA-refine the ratio UP toward whatever the host's
+        # actual burst-mode accel response is.
+        self._pct_per_hid_fast_x = DEFAULT_PCT_PER_HID
+        self._pct_per_hid_fast_y = DEFAULT_PCT_PER_HID
         self._diff_misses_in_a_row = 0
         self._zoom_levels_applied = 0
         # If init's HSV candidate fails motion verification, disable
