@@ -747,6 +747,63 @@ class VisualServoHomer:
                 residual_at_last_check = residual
                 last_check_step = step
 
+            # ─────────────────── cruise mode ───────────────────
+            # When the residual is large, the cursor needs to TRAVERSE
+            # toward target before the closed-loop refinement matters.
+            # The per-step overhead during traversal is dominated by
+            # two capture_color() calls + SETTLE_SEC + locator
+            # detection — all of which exist to MEASURE where the
+            # cursor ended up so the homer can correct course.
+            # During traversal we don't NEED to correct course step-
+            # by-step; the cursor is going in roughly the right
+            # direction and we'll have plenty of measurement steps
+            # left once we're close. Skip the measurement entirely:
+            # send a maxed-out HID for the full residual, brief sleep,
+            # extrapolate cursor_img open-loop via the current ratio.
+            # Cuts per-step time from ~1s to ~0.2s during the cruise
+            # phase. Falls through to the existing closed-loop path
+            # the moment residual ≤ CRUISE_RESIDUAL_PCT (20%).
+            CRUISE_RESIDUAL_PCT = 0.20
+            CRUISE_SLEEP_S = 0.05
+            if residual > CRUISE_RESIDUAL_PCT and not axis_aligned:
+                # Fire a HID computed to cover the FULL remaining
+                # residual (no damping). _hid_for_residual divides by
+                # STEP_DISTANCE_FRACTION; here we bypass and use the
+                # ratio directly so the HID lands as close to the aim
+                # as the hard MAX_HID_PER_AXIS cap allows.
+                ratio_x = max(RATIO_MIN, min(RATIO_MAX, self._pct_per_hid_x))
+                ratio_y = max(RATIO_MIN, min(RATIO_MAX, self._pct_per_hid_y))
+                cruise_hid_dx = 0
+                cruise_hid_dy = 0
+                if abs(dx_pct) >= 1e-4:
+                    h = int(abs(dx_pct) / ratio_x)
+                    h = max(MIN_HID_PER_AXIS, min(MAX_HID_PER_AXIS, h))
+                    cruise_hid_dx = h if dx_pct > 0 else -h
+                if abs(dy_pct) >= 1e-4:
+                    h = int(abs(dy_pct) / ratio_y)
+                    h = max(MIN_HID_PER_AXIS, min(MAX_HID_PER_AXIS, h))
+                    cruise_hid_dy = h if dy_pct > 0 else -h
+                t_cruise = time.monotonic()
+                await self._send_hid(cruise_hid_dx, cruise_hid_dy)
+                await asyncio.sleep(CRUISE_SLEEP_S)
+                # Open-loop cursor estimate. Trust the homer's current
+                # ratio; it'll be corrected by closed-loop measurement
+                # as soon as residual drops below the cruise threshold.
+                cursor_img = (
+                    cursor_img[0] + cruise_hid_dx * ratio_x,
+                    cursor_img[1] + cruise_hid_dy * ratio_y,
+                )
+                self._last_cursor_pct = cursor_img
+                elapsed_c = time.monotonic() - t_cruise
+                print(
+                    f"  [{step:02d}|>] cruise hid=({cruise_hid_dx:+4d},"
+                    f"{cruise_hid_dy:+4d}) cursor→"
+                    f"({cursor_img[0]:.2%},{cursor_img[1]:.2%}) "
+                    f"aim=({target_aim[0]:.2%},{target_aim[1]:.2%}) "
+                    f"resid={residual:.2%} {elapsed_c:.2f}s"
+                )
+                continue
+
             if residual <= click_tol_pct:
                 confirm_count += 1
                 print(
