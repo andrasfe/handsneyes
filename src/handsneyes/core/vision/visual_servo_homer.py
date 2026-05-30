@@ -1986,15 +1986,15 @@ class VisualServoHomer:
             history=history, target_desc="<manual>",
             verify_navigation=False, last_proof=None,
             confirm_frames=1,
-            # 0.006 (0.6%) — tighter than the legacy 0.010. The
-            # ROI servo's per-step is cheap and ratio-refined, so
-            # the few extra small-step iterations needed to drive
-            # residual below 0.6% are basically free wall-time-wise.
-            # 0.6% on 1920w ≈ 11 px ≈ ~3 mm on a 27" 1080p display.
-            # Final click error is then dominated by the hotspot
-            # offset calibration variance (~0.5-1% session-to-
-            # session) rather than the servo loop.
-            click_tol_pct=0.006,
+            # 0.010 (1%) — matches the legacy default. Tightened
+            # briefly to 0.006 but the ROI servo can fail to
+            # converge on busy backgrounds (page animations being
+            # caught by the frame-diff detector as spurious cursor
+            # blobs) at that tolerance. 1% is loose enough to
+            # converge reliably; final-step measurement noise
+            # contributes ±0.5% on top, so worst-case visible
+            # click error is ~1.5% (~29 px ≈ 0.4" on 27" 1080p).
+            click_tol_pct=0.010,
             click=click,
             axis_aligned=(prev_cursor_pct is not None),
             dragging=dragging,
