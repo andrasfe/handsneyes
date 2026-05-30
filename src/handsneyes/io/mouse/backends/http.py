@@ -114,10 +114,18 @@ class HttpMouseOutput(MouseOutput):
             f"{self._prefix}/move_large", {"x": dx, "y": dy},
         )
 
-    async def click(self, button: str = "left") -> None:
-        """Send a mouse button click."""
-        await self._post(f"{self._prefix}/click", {"button": button})
-        logger.debug("Mouse click: %s", button)
+    async def click(self, button: str = "left", count: int = 1) -> None:
+        """Send a mouse button click. count > 1 fires a multi-click
+        natively on the Pi with tight inter-click timing — better
+        than dispatching N single clicks from the dev side, which
+        adds HTTP roundtrip per click and risks pushing the press-
+        to-press gap past macOS's double-click threshold.
+        """
+        await self._post(
+            f"{self._prefix}/click",
+            {"button": button, "count": count},
+        )
+        logger.debug("Mouse click: %s x%d", button, count)
 
     async def press(self, button: str = "left") -> None:
         """Hold a button down — paired with release() for drag flows."""

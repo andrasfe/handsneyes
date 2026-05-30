@@ -1025,21 +1025,26 @@ class VisualServoHomer:
                         # clicking, then scrolls at that pixel),
                         # capture proof, return success.
                         if click:
-                            await self._session._executor._mouse.click(button)
-                            # Multi-click: fire the extras BEFORE
-                            # the 0.4 s proof sleep so all clicks
-                            # land inside macOS's double-click
-                            # window (~250 ms). Without this the
-                            # proof sleep splits the gap past the
-                            # threshold and macOS sees independent
-                            # single clicks instead of a double /
-                            # triple.
-                            for _ in range(1, click_count):
-                                await asyncio.sleep(0.08)
-                                try:
-                                    await self._session._executor._mouse.click(button)
-                                except Exception:
-                                    break
+                            # Native Pi multi-click — ~40 ms inter-
+                            # click on the Pi vs ~150 ms when dev-
+                            # side dispatched each click via HTTP.
+                            # Eliminates the press-to-press gap
+                            # creep that was occasionally pushing
+                            # double-clicks past macOS's threshold.
+                            try:
+                                await self._session._executor._mouse.click(
+                                    button, count=click_count,
+                                )
+                            except TypeError:
+                                # Older backend; fall back to dev-
+                                # side sequencing.
+                                await self._session._executor._mouse.click(button)
+                                for _ in range(1, click_count):
+                                    await asyncio.sleep(0.08)
+                                    try:
+                                        await self._session._executor._mouse.click(button)
+                                    except Exception:
+                                        break
                         try:
                             await asyncio.sleep(0.4)
                             proof = await self._capture_proof(
@@ -3118,13 +3123,26 @@ class VisualServoHomer:
                 pre_click_color = await self._capture_color()
             except Exception:
                 pre_click_color = None
-            await self._session._executor._mouse.click(button)
-            for _ in range(1, click_count):
-                await asyncio.sleep(0.08)
-                try:
-                    await self._session._executor._mouse.click(button)
-                except Exception:
-                    break
+            # Native multi-click: passing count > 1 sequences the
+            # clicks on the Pi with ~40 ms inter-click timing
+            # (vs ~150 ms when the dev side dispatched each click
+            # separately and the per-click HTTP roundtrip stacked
+            # up). Well within macOS's double-click window even on
+            # "Fast" user settings.
+            try:
+                await self._session._executor._mouse.click(
+                    button, count=click_count,
+                )
+            except TypeError:
+                # Older backend without count= parameter — fall
+                # back to dev-side sequencing.
+                await self._session._executor._mouse.click(button)
+                for _ in range(1, click_count):
+                    await asyncio.sleep(0.08)
+                    try:
+                        await self._session._executor._mouse.click(button)
+                    except Exception:
+                        break
         post_click_color: np.ndarray | None = None
         try:
             await asyncio.sleep(0.4)

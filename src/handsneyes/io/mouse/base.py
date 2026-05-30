@@ -72,11 +72,16 @@ class MouseOutput(ABC):
             rem_y -= sy
 
     @abstractmethod
-    async def click(self, button: str = "left") -> None:
+    async def click(self, button: str = "left", count: int = 1) -> None:
         """Send a mouse button click (press + release).
 
         Args:
             button: Button to click: "left", "right", or "middle".
+            count: Number of clicks to send back-to-back. Backends
+                that support native multi-click (HTTP/Pi) honour
+                this with tight inter-click timing; the abstract
+                contract is "fire N clicks at the current cursor
+                position with no movement between."
 
         Raises:
             MouseOutputError: If the click cannot be sent.
