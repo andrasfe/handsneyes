@@ -1602,6 +1602,18 @@ class VisualServoHomer:
             a = cv2.contourArea(c)
             if a < 15:  # noise
                 continue
+            # Aspect-ratio filter: blinking text-input carets are
+            # thin tall rectangles (bbox h ≫ w). The mouse cursor
+            # sprite is roughly square (arrow is wider than it is
+            # tall, I-beam is symmetric, hand is square-ish). Reject
+            # blobs where the bounding box is more than ~3× tall
+            # than wide — those are carets, not cursors. Without
+            # this, clicking into a focused text field locks the
+            # detector onto the caret's blink, the servo loop
+            # thrashes, and the click bails to best_effort.
+            bx, by, bw, bh = cv2.boundingRect(c)
+            if bh > 0 and bw > 0 and bh / bw > 3.0 and bh >= 6:
+                continue
             M = cv2.moments(c)
             if M["m00"] == 0:
                 continue
