@@ -725,6 +725,11 @@ class VisualServoHomer:
         # they'd rather have an imprecise click than nothing.
         best_residual = initial_residual
         best_cursor_img = cursor_img
+        # Cruise mode: track consecutive HSV misses so a fast burst
+        # that lands the cursor somewhere find_cursor_hsv can't see
+        # bails to the closed-loop path (with its full cursor-finder
+        # cascade) rather than extrapolating off into the void.
+        cruise_misses = 0
         for step in range(1, max_steps_dynamic + 1):
             t_step = time.monotonic()
 
@@ -748,59 +753,92 @@ class VisualServoHomer:
                 last_check_step = step
 
             # ─────────────────── cruise mode ───────────────────
-            # When the residual is large, the cursor needs to TRAVERSE
-            # toward target before the closed-loop refinement matters.
-            # The per-step overhead during traversal is dominated by
-            # two capture_color() calls + SETTLE_SEC + locator
-            # detection — all of which exist to MEASURE where the
-            # cursor ended up so the homer can correct course.
-            # During traversal we don't NEED to correct course step-
-            # by-step; the cursor is going in roughly the right
-            # direction and we'll have plenty of measurement steps
-            # left once we're close. Skip the measurement entirely:
-            # send a maxed-out HID for the full residual, brief sleep,
-            # extrapolate cursor_img open-loop via the current ratio.
-            # Cuts per-step time from ~1s to ~0.2s during the cruise
-            # phase. Falls through to the existing closed-loop path
-            # the moment residual ≤ CRUISE_RESIDUAL_PCT (20%).
+            # Long-distance traversal: send a high-speed burst via
+            # the unchunked ``_send_hid_fast`` path (macOS pointer-
+            # accel applies its high-velocity curve, so each HID
+            # unit moves significantly more screen than under the
+            # closed-loop's chunked path), measure the cursor with
+            # ``find_cursor_hsv`` (skipping the full locator cascade
+            # and ratio refinement), and loop until residual drops
+            # below CRUISE_RESIDUAL_PCT or HSV stops finding the
+            # cursor (handed back to closed-loop with its full
+            # cascade). Wall-time win comes from BOTH bypassing the
+            # ~3.3 ms-per-HID-unit chunking AND skipping pre-capture
+            # + settle + locator cascade per step.
             CRUISE_RESIDUAL_PCT = 0.20
-            CRUISE_SLEEP_S = 0.05
-            if residual > CRUISE_RESIDUAL_PCT and not axis_aligned:
-                # Fire a HID computed to cover the FULL remaining
-                # residual (no damping). _hid_for_residual divides by
-                # STEP_DISTANCE_FRACTION; here we bypass and use the
-                # ratio directly so the HID lands as close to the aim
-                # as the hard MAX_HID_PER_AXIS cap allows.
-                ratio_x = max(RATIO_MIN, min(RATIO_MAX, self._pct_per_hid_x))
-                ratio_y = max(RATIO_MIN, min(RATIO_MAX, self._pct_per_hid_y))
+            CRUISE_SETTLE_S = 0.25
+            MAX_CRUISE_MISSES = 1
+            if (
+                residual > CRUISE_RESIDUAL_PCT
+                and cruise_misses <= MAX_CRUISE_MISSES
+            ):
+                # Chunked-send cruise (matches closed-loop's HID
+                # path → shared ratio, shared accel curve). The win
+                # vs closed-loop comes from skipping the per-step
+                # locator cascade (template-match + ROI diff +
+                # ratio refine + outlier reject + oscillation re-
+                # localize) — cruise does one capture + HSV motion-
+                # diff and either uses it or bails. Each cruise
+                # step sends MAX_HID_PER_AXIS per axis (vs closed-
+                # loop's STEP_DISTANCE_FRACTION-damped HID), so the
+                # cursor covers more ground per step too.
+                rx = max(RATIO_MIN, min(RATIO_MAX, self._pct_per_hid_x))
+                ry = max(RATIO_MIN, min(RATIO_MAX, self._pct_per_hid_y))
                 cruise_hid_dx = 0
                 cruise_hid_dy = 0
                 if abs(dx_pct) >= 1e-4:
-                    h = int(abs(dx_pct) / ratio_x)
+                    h = int(abs(dx_pct) / rx)
                     h = max(MIN_HID_PER_AXIS, min(MAX_HID_PER_AXIS, h))
                     cruise_hid_dx = h if dx_pct > 0 else -h
                 if abs(dy_pct) >= 1e-4:
-                    h = int(abs(dy_pct) / ratio_y)
+                    h = int(abs(dy_pct) / ry)
                     h = max(MIN_HID_PER_AXIS, min(MAX_HID_PER_AXIS, h))
                     cruise_hid_dy = h if dy_pct > 0 else -h
+                if axis_aligned:
+                    if abs(dx_pct) > abs(dy_pct):
+                        cruise_hid_dy = 0
+                    else:
+                        cruise_hid_dx = 0
+
                 t_cruise = time.monotonic()
+                pre_cursor = cursor_img
+                pre_color = await self._capture_color()
                 await self._send_hid(cruise_hid_dx, cruise_hid_dy)
-                await asyncio.sleep(CRUISE_SLEEP_S)
-                # Open-loop cursor estimate. Trust the homer's current
-                # ratio; it'll be corrected by closed-loop measurement
-                # as soon as residual drops below the cruise threshold.
-                cursor_img = (
-                    cursor_img[0] + cruise_hid_dx * ratio_x,
-                    cursor_img[1] + cruise_hid_dy * ratio_y,
+                await asyncio.sleep(CRUISE_SETTLE_S)
+                post_color = await self._capture_color()
+                new_hit = find_cursor_hsv_motion(pre_color, post_color)
+
+                measured = (
+                    new_hit is not None
+                    and BLOB_MIN_AREA <= new_hit.area_pct <= BLOB_MAX_AREA
                 )
+                if measured:
+                    cursor_img = (new_hit.x_pct, new_hit.y_pct)
+                    cruise_misses = 0
+                    self._refine_ratio(
+                        cruise_hid_dx, cruise_hid_dy,
+                        cursor_img[0] - pre_cursor[0],
+                        cursor_img[1] - pre_cursor[1],
+                    )
+                else:
+                    # Don't extrapolate — closed-loop's full cascade
+                    # will re-localize on the next iteration. Bail
+                    # to closed-loop after the configured budget so
+                    # cruise can't ping-pong on a HSV-blind region.
+                    cruise_misses += 1
+
                 self._last_cursor_pct = cursor_img
                 elapsed_c = time.monotonic() - t_cruise
+                tag = ">" if measured else "?"
                 print(
-                    f"  [{step:02d}|>] cruise hid=({cruise_hid_dx:+4d},"
-                    f"{cruise_hid_dy:+4d}) cursor→"
-                    f"({cursor_img[0]:.2%},{cursor_img[1]:.2%}) "
+                    f"  [{step:02d}|{tag}] cruise "
+                    f"hid=({cruise_hid_dx:+4d},{cruise_hid_dy:+4d}) "
+                    f"cursor→({cursor_img[0]:.2%},{cursor_img[1]:.2%}) "
                     f"aim=({target_aim[0]:.2%},{target_aim[1]:.2%}) "
-                    f"resid={residual:.2%} {elapsed_c:.2f}s"
+                    f"resid={residual:.2%} "
+                    f"r=({self._pct_per_hid_x*1000:.3f},"
+                    f"{self._pct_per_hid_y*1000:.3f})‰ "
+                    f"{elapsed_c:.2f}s"
                 )
                 continue
 
