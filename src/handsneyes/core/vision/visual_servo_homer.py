@@ -777,7 +777,9 @@ class VisualServoHomer:
             # ~3.3 ms-per-HID-unit chunking AND skipping pre-capture
             # + settle + locator cascade per step.
             CRUISE_RESIDUAL_PCT = 0.20
-            CRUISE_SETTLE_S = 0.35
+            CRUISE_BURST_SETTLE_S = 0.30   # cursor must STOP before wiggle
+            CRUISE_WIGGLE_HID = 35          # slow chunked, ~5%/35 ≈ 0.15‰ → ~30 px on 1920w
+            CRUISE_WIGGLE_SETTLE_S = 0.18
             MAX_CRUISE_MISSES = 1
             CRUISE_MAX_HID_PER_AXIS = MAX_HID_PER_AXIS
             if (
@@ -821,36 +823,86 @@ class VisualServoHomer:
 
                 t_cruise = time.monotonic()
                 pre_cursor = cursor_img
-                pre_color = await self._capture_color()
-                await self._send_hid_burst(cruise_hid_dx, cruise_hid_dy)
-                await asyncio.sleep(CRUISE_SETTLE_S)
-                post_color = await self._capture_color()
-                # Predict where the cursor should have landed and
-                # constrain the motion-diff search to a generous
-                # window around that prediction. Filters out red
-                # UI element ghosts (cursor on dark mode crosses
-                # a brand-coloured area between pre and post) and
-                # speeds up the contour scan.
-                predicted_x = pre_cursor[0] + cruise_hid_dx * fr_x
-                predicted_y = pre_cursor[1] + cruise_hid_dy * fr_y
-                new_hit = find_cursor_hsv_motion(
-                    pre_color, post_color,
-                    near_pct=(predicted_x, predicted_y),
-                    max_dist_pct=0.40,
-                )
-                # If the constrained search fails, retry unconstrained
-                # in case the fast ratio is so off that the prediction
-                # is nowhere near where the cursor actually went.
-                if new_hit is None:
-                    new_hit = find_cursor_hsv_motion(pre_color, post_color)
 
-                measured = (
-                    new_hit is not None
-                    and BLOB_MIN_AREA <= new_hit.area_pct <= BLOB_MAX_AREA
+                # ─── Step 1: fast burst ─────────────────────────
+                # Send the burst. Cursor flies somewhere — we
+                # don't know where because:
+                #   - HSV between pre-burst and post-burst can't
+                #     find the cursor reliably (encoder smears
+                #     red during fast motion);
+                #   - fast-mode pointer-accel ratio is uncertain
+                #     until we measure it.
+                # That's fine: the burst's only job is to cover
+                # ground. Localization happens in step 3.
+                await self._send_hid_burst(cruise_hid_dx, cruise_hid_dy)
+                await asyncio.sleep(CRUISE_BURST_SETTLE_S)
+
+                # ─── Step 2: pre-wiggle capture ─────────────────
+                # Cursor is now stationary (burst settled). The
+                # wiggle's pre-frame captures it at rest.
+                pre_wiggle = await self._capture_gray()
+
+                # ─── Step 3: known small chunked wiggle ─────────
+                # A slow chunked move (no encoder smear, cursor
+                # red survives) by a known small delta. We KNOW
+                # the wiggle's expected pixel delta because the
+                # closed-loop ratio is calibrated. Frame-diff
+                # between pre-wiggle and post-wiggle finds the
+                # cursor as the ONE blob that moved by exactly
+                # the expected vector — color-agnostic, so
+                # encoder colour shifts don't matter.
+                wiggle_dx_pct = (
+                    CRUISE_WIGGLE_HID * self._pct_per_hid_x
                 )
+                wiggle_dy_pct = (
+                    CRUISE_WIGGLE_HID * self._pct_per_hid_y
+                )
+                await self._send_hid(
+                    CRUISE_WIGGLE_HID, CRUISE_WIGGLE_HID,
+                )
+                await asyncio.sleep(CRUISE_WIGGLE_SETTLE_S)
+                post_wiggle = await self._capture_gray()
+
+                # ─── Step 4: find the cursor via wiggle wake ───
+                # Predict where post-wiggle cursor SHOULD be:
+                # pre-burst position + burst delta (using current
+                # fast-ratio estimate) + wiggle delta. The
+                # frame-diff detector scores candidate blobs by
+                # distance to this prediction.
+                predicted_post_burst = (
+                    pre_cursor[0] + cruise_hid_dx * fr_x,
+                    pre_cursor[1] + cruise_hid_dy * fr_y,
+                )
+                predicted_post_wiggle = (
+                    predicted_post_burst[0] + wiggle_dx_pct,
+                    predicted_post_burst[1] + wiggle_dy_pct,
+                )
+                new_pos, _ = self._detect_cursor_motion(
+                    pre_wiggle, post_wiggle,
+                    expected_dx_pct=wiggle_dx_pct,
+                    expected_dy_pct=wiggle_dy_pct,
+                    last_known=predicted_post_burst,
+                )
+
+                # ─── Step 5: undo the wiggle ────────────────────
+                # Cursor returns to post-burst position.
+                await self._send_hid(
+                    -CRUISE_WIGGLE_HID, -CRUISE_WIGGLE_HID,
+                )
+
+                measured = new_pos is not None
                 if measured:
-                    cursor_img = (new_hit.x_pct, new_hit.y_pct)
+                    # Subtract the wiggle delta to recover the
+                    # post-burst landing point — that's where the
+                    # cursor is NOW (the wiggle was just
+                    # undone).
+                    cursor_img = (
+                        new_pos[0] - wiggle_dx_pct,
+                        new_pos[1] - wiggle_dy_pct,
+                    )
                     cruise_misses = 0
+                    # Refine fast-mode ratio from observed burst
+                    # delta (post_burst_cursor - pre_burst_cursor).
                     self._refine_fast_ratio(
                         cruise_hid_dx, cruise_hid_dy,
                         cursor_img[0] - pre_cursor[0],
