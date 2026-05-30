@@ -1602,17 +1602,24 @@ class VisualServoHomer:
             a = cv2.contourArea(c)
             if a < 15:  # noise
                 continue
-            # Aspect-ratio filter: blinking text-input carets are
-            # thin tall rectangles (bbox h ≫ w). The mouse cursor
-            # sprite is roughly square (arrow is wider than it is
-            # tall, I-beam is symmetric, hand is square-ish). Reject
-            # blobs where the bounding box is more than ~3× tall
-            # than wide — those are carets, not cursors. Without
-            # this, clicking into a focused text field locks the
-            # detector onto the caret's blink, the servo loop
-            # thrashes, and the click bails to best_effort.
+            # Aspect-ratio filter against blinking text-input carets
+            # WITHOUT also filtering out the macOS I-beam cursor
+            # (which appears when the mouse hovers over editable
+            # text). Both are tall and thin, but:
+            #   - text caret: ~1-2 px wide, single vertical bar
+            #   - I-beam cursor: ~4-6 px wide, has serif endpoints
+            #     at top and bottom that widen the bounding box
+            # So a blob is a caret (and should be rejected) only
+            # when it's BOTH very tall-to-wide AND extremely thin
+            # in absolute pixels. The I-beam's serifs survive this
+            # filter; the caret's vertical line doesn't.
             bx, by, bw, bh = cv2.boundingRect(c)
-            if bh > 0 and bw > 0 and bh / bw > 3.0 and bh >= 6:
+            if (
+                bh > 0 and bw > 0
+                and bh / bw > 5.0
+                and bw <= 2
+                and bh >= 6
+            ):
                 continue
             M = cv2.moments(c)
             if M["m00"] == 0:
@@ -1721,6 +1728,10 @@ class VisualServoHomer:
 
         pops_used = 0
         confirm_count = 0
+        # Tracks consecutive root-ROI detection failures (no blob in
+        # ROI, escape-pop also failed). Drives the no-slam "trust
+        # the cache" fast-bail below.
+        consec_relocalize_fails = 0
         best_residual = math.hypot(
             target_aim[0] - cursor_img[0], target_aim[1] - cursor_img[1],
         )
@@ -1915,8 +1926,39 @@ class VisualServoHomer:
                         f"{cursor_img[1]:.2%}) and continuing"
                     )
                     continue
-                # Stack at root, or we've popped too many times — give
-                # the legacy oscillation re-localize a turn.
+                # Stack at root, or we've popped too many times.
+                # Trust-the-cache fast bail: in no-slam mode the
+                # cached cursor position is "where the previous
+                # click landed", which on a remote screen-share
+                # target may be the most reliable signal we have
+                # (frame-diff in a tight ROI on a busy/focused UI
+                # is noisy — caret blinks, focus highlights, video
+                # encoder banding all show up). Rather than grind
+                # through oscillation re-localizes that may also
+                # fail, after 3 consecutive root-ROI detection
+                # failures in no-slam mode, just trust the cached
+                # cursor and commit — the click will land within
+                # ~1-2 % of intent (the residual we computed at
+                # loop start), which is better than burning 30+
+                # steps trying to drive it lower via a broken
+                # detection signal.
+                consec_relocalize_fails += 1
+                if (
+                    axis_aligned  # = no-slam mode
+                    and consec_relocalize_fails >= 3
+                    and residual < 0.05
+                ):
+                    print(
+                        f"  [{step:02d}|?] {consec_relocalize_fails} consecutive "
+                        f"detection failures in no-slam mode with residual "
+                        f"{residual:.2%} — trusting cached cursor and clicking"
+                    )
+                    return await self._roi_commit_click(
+                        target_aim=target_aim, target_img=target_img,
+                        cursor_img=cursor_img, button=button,
+                        click=click, click_count=click_count,
+                        run_dir=run_dir, step=step, history=history,
+                    )
                 print(
                     f"  [{step:02d}|?] root ROI detection failed "
                     f"(pops={pops_used}) — oscillation re-localize"
@@ -1942,6 +1984,7 @@ class VisualServoHomer:
             new_cursor, blob_area = hit
             pre_cursor_pos = cursor_img
             cursor_img = new_cursor
+            consec_relocalize_fails = 0
 
             # Refine the chunked-mode pct-per-HID ratio from the
             # observed motion. Same EMA update the legacy servo
