@@ -1812,6 +1812,7 @@ function _physicalKeyFromCode(code) {
   return punct[code] || null;
 }
 
+let _lastPassthroughKeyAt = 0;
 function _passthroughHandleKey(e) {
   if (!$passInput) return;
   // Let the browser handle navigation modifier-only events.
@@ -1839,6 +1840,11 @@ function _passthroughHandleKey(e) {
   // wrong and they're typing into the void.
   _maybeShowPassthroughWarn();
   e.preventDefault();
+  // Mark that this keystroke has been processed so the mobile
+  // beforeinput handler (which mirrors edits on platforms where
+  // keydown is unreliable) doesn't double-fire on desktop where
+  // both events arrive for the same edit.
+  _lastPassthroughKeyAt = performance.now();
 
   let hasCtrl = e.ctrlKey;
   const hasMeta = e.metaKey;
@@ -2102,6 +2108,43 @@ document.addEventListener("focusout", _refreshHostKbCue);
 
 if ($passInput) {
   $passInput.addEventListener("keydown", _passthroughHandleKey);
+  // Mobile soft-keyboard support. iOS Safari and most Android
+  // keyboards skip the `keydown` event for editing keys (Backspace,
+  // Enter on some IMEs, arrow keys) and instead dispatch
+  // `beforeinput` with an `inputType` describing the edit. Without
+  // this handler, backspace on a phone never fires _passthroughHandleKey
+  // and the host receives no delete keystroke.
+  //
+  // We translate the most common inputTypes into the synthetic
+  // KeyboardEvent the passthrough handler expects, then route
+  // them through the same code path as a desktop keydown.
+  const _INPUT_TYPE_TO_KEY = {
+    "deleteContentBackward": "Backspace",
+    "deleteContent":         "Backspace",
+    "deleteWordBackward":    "Backspace",  // approx — Alt-Backspace ideally
+    "deleteContentForward":  "Delete",
+    "insertLineBreak":       "Enter",
+    "insertParagraph":       "Enter",
+  };
+  $passInput.addEventListener("beforeinput", (e) => {
+    if (_isComposeMode()) return;  // compose mode handles edits locally
+    const key = _INPUT_TYPE_TO_KEY[e.inputType];
+    if (!key) return;
+    // De-dup: if the keydown handler just processed this edit
+    // (desktop firing both events), skip the beforeinput re-fire.
+    // The 100ms window is wider than any single edit ack but
+    // tighter than a deliberate double-tap on mobile.
+    if (performance.now() - _lastPassthroughKeyAt < 100) return;
+    // Synthesize a keydown shape so _passthroughHandleKey can
+    // route through the special-keys path and call _applySpecialLocally.
+    const synthetic = {
+      key, code: key,
+      ctrlKey: false, metaKey: false, altKey: false, shiftKey: false,
+      preventDefault: () => e.preventDefault(),
+    };
+    e.preventDefault();
+    _passthroughHandleKey(synthetic);
+  });
   // Paste handling. In live mode: forward to the host as one text
   // burst (mirrors the live-typing semantics). In compose mode: do
   // nothing — let the browser paste into the local field. Without
