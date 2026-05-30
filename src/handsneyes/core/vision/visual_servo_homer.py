@@ -774,7 +774,7 @@ class VisualServoHomer:
             # ~3.3 ms-per-HID-unit chunking AND skipping pre-capture
             # + settle + locator cascade per step.
             CRUISE_RESIDUAL_PCT = 0.20
-            CRUISE_SETTLE_S = 0.22
+            CRUISE_SETTLE_S = 0.35
             MAX_CRUISE_MISSES = 1
             CRUISE_MAX_HID_PER_AXIS = MAX_HID_PER_AXIS
             if (
@@ -822,7 +822,24 @@ class VisualServoHomer:
                 await self._send_hid_burst(cruise_hid_dx, cruise_hid_dy)
                 await asyncio.sleep(CRUISE_SETTLE_S)
                 post_color = await self._capture_color()
-                new_hit = find_cursor_hsv_motion(pre_color, post_color)
+                # Predict where the cursor should have landed and
+                # constrain the motion-diff search to a generous
+                # window around that prediction. Filters out red
+                # UI element ghosts (cursor on dark mode crosses
+                # a brand-coloured area between pre and post) and
+                # speeds up the contour scan.
+                predicted_x = pre_cursor[0] + cruise_hid_dx * fr_x
+                predicted_y = pre_cursor[1] + cruise_hid_dy * fr_y
+                new_hit = find_cursor_hsv_motion(
+                    pre_color, post_color,
+                    near_pct=(predicted_x, predicted_y),
+                    max_dist_pct=0.40,
+                )
+                # If the constrained search fails, retry unconstrained
+                # in case the fast ratio is so off that the prediction
+                # is nowhere near where the cursor actually went.
+                if new_hit is None:
+                    new_hit = find_cursor_hsv_motion(pre_color, post_color)
 
                 measured = (
                     new_hit is not None
