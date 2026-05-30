@@ -710,6 +710,24 @@ class VisualServoHomer:
         dragging: bool = False,
         click_count: int = 1,
     ) -> ClickOutcome:
+        # Opt-in ROI-stack servo. Same signature; replaces the
+        # proportional-HID + cascade-detection inner loop with a
+        # nested-rectangle visual servo (see _servo_loop_roi).
+        # Kept behind a flag so we can A/B against the legacy loop
+        # before deleting any code paths.
+        import os
+        if os.environ.get("HANDSNEYES_ROI_SERVO") == "1":
+            return await self._servo_loop_roi(
+                target_aim=target_aim, target_img=target_img,
+                cursor_img=cursor_img, button=button, run_dir=run_dir,
+                history=history, target_desc=target_desc,
+                verify_navigation=verify_navigation,
+                last_proof=last_proof,
+                confirm_frames=confirm_frames,
+                click_tol_pct=click_tol_pct,
+                click=click, axis_aligned=axis_aligned,
+                dragging=dragging, click_count=click_count,
+            )
         """Run the visual-servo loop until cursor lands on target_aim.
 
         Extracted from ``_run_inner`` so the same loop can also serve
@@ -2542,6 +2560,434 @@ class VisualServoHomer:
             pass
 
     # ────────────────────── HID maths ──────────────────────
+
+    def _detect_cursor_in_roi(
+        self,
+        pre: np.ndarray, post: np.ndarray,
+        roi_pct: tuple[float, float, float, float],
+        diff_thresh: int = 12,
+        near_pct: tuple[float, float] | None = None,
+    ) -> tuple[tuple[float, float], int] | None:
+        """Find the cursor by frame-diffing PRE and POST within ROI.
+
+        ``roi_pct`` is (x, y, w, h) in image-percent. Returns
+        ((cx_pct, cy_pct), area_px) or None if no plausible blob.
+
+        The cursor is by construction the only thing that moved
+        between PRE and POST when callers diff frames captured
+        across a single HID move. Restricting the diff to the ROI
+        suppresses everything outside it (page repaint, decorative
+        animation, encoder banding far from the cursor's expected
+        path).
+        """
+        if pre.shape != post.shape:
+            return None
+        if pre.ndim == 3:
+            pre = cv2.cvtColor(pre, cv2.COLOR_BGR2GRAY)
+        if post.ndim == 3:
+            post = cv2.cvtColor(post, cv2.COLOR_BGR2GRAY)
+        h, w = pre.shape[:2]
+        # Clamp ROI to frame bounds.
+        rx = max(0, int(roi_pct[0] * w))
+        ry = max(0, int(roi_pct[1] * h))
+        rw = min(w - rx, int(roi_pct[2] * w))
+        rh = min(h - ry, int(roi_pct[3] * h))
+        if rw <= 0 or rh <= 0:
+            return None
+        pre_roi = pre[ry:ry+rh, rx:rx+rw]
+        post_roi = post[ry:ry+rh, rx:rx+rw]
+        diff = cv2.absdiff(pre_roi, post_roi)
+        _, mask = cv2.threshold(diff, diff_thresh, 255, cv2.THRESH_BINARY)
+        kernel3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel3)
+        mask = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
+        )
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+        )
+        # Cursor diff has TWO blobs: where it WAS (pre position) and
+        # where it IS (post position). They'll be similar size. Return
+        # the largest (or the one whose movement direction matches the
+        # commanded HID — but the caller knows which is "post" by
+        # passing pre and post in the right order; we just return the
+        # NEW one, which is the one expected at the predicted target).
+        candidates = []
+        for c in contours:
+            a = cv2.contourArea(c)
+            if a < 15:  # noise
+                continue
+            M = cv2.moments(c)
+            if M["m00"] == 0:
+                continue
+            cx_roi = M["m10"] / M["m00"]
+            cy_roi = M["m01"] / M["m00"]
+            # Convert ROI-relative px back to full-frame pct.
+            cx_pct = (rx + cx_roi) / w
+            cy_pct = (ry + cy_roi) / h
+            candidates.append(((cx_pct, cy_pct), int(a)))
+        if not candidates:
+            return None
+        # Frame-diff returns TWO cursor blobs: the pre-move position
+        # and the post-move position. Without disambiguation, picking
+        # by area flips between them step-to-step (the cursor moves,
+        # the apparent "best" blob alternates). When the caller passes
+        # ``near_pct`` (the open-loop predicted post-cursor position),
+        # we pick the candidate closest to it — that's the POST blob
+        # by construction. Without ``near_pct``, fall back to area
+        # (legacy behaviour, kept for non-servo callers).
+        if near_pct is not None:
+            candidates.sort(
+                key=lambda p: math.hypot(
+                    p[0][0] - near_pct[0], p[0][1] - near_pct[1],
+                ),
+            )
+        else:
+            candidates.sort(key=lambda p: -p[1])
+        return candidates[0]
+
+    async def _servo_loop_roi(
+        self, *,
+        target_aim: tuple[float, float],
+        target_img: tuple[float, float],
+        cursor_img: tuple[float, float],
+        button: str,
+        run_dir: Path,
+        history: list[StepRecord],
+        target_desc: str,
+        verify_navigation: bool,
+        last_proof: str | None,
+        confirm_frames: int = CONFIRM_FRAMES,
+        click_tol_pct: float = CLICK_TOL_PCT,
+        click: bool = True,
+        axis_aligned: bool = False,
+        dragging: bool = False,
+        click_count: int = 1,
+    ) -> ClickOutcome:
+        """ROI-stack visual servo (experimental, opt-in via
+        HANDSNEYES_ROI_SERVO=1).
+
+        Replaces the proportional-HID inner loop + per-step locator
+        cascade with a nested-rectangle approach:
+          - Each iteration's detection is restricted to a ROI that
+            contains both the aim point and the cursor's last known
+            position. Frame-diff suffices — no HSV/template/
+            oscillation needed every step.
+          - On successful detection, push a tighter ROI (bounding
+            box of aim + predicted next cursor position + small
+            padding) onto a stack.
+          - If detection fails (cursor escaped the ROI), pop to the
+            previous larger ROI. If stack empty: fall back to whole-
+            frame oscillation re-localize.
+
+        Reuses cruise, slam, and oscillation re-localize verbatim —
+        only the inner refinement loop is new.
+        """
+        # ROI tuning — image-percent units throughout
+        INITIAL_PAD = 0.08         # padding around (aim, cursor) for the root ROI
+        PUSH_PAD = 0.04            # padding when pushing a tighter ROI
+        ROI_MIN_SIDE = 0.06        # don't shrink either dimension below this
+        MAX_POP_DEPTH_PER_RUN = 6  # total pops before bailing to oscillation
+        MAX_STEPS_ROI = 50
+        ROI_SETTLE_SEC = 0.18
+        # Cruise threshold: when residual exceeds this, fire a big
+        # burst via _send_hid_burst (the same fast traversal the
+        # legacy loop uses) and frame-diff in the root ROI to find
+        # the cursor at its new position. Below the threshold, fall
+        # through to chunked closed-loop refinement.
+        ROI_CRUISE_PCT = 0.20
+        ROI_CRUISE_SETTLE_S = 0.30
+
+        def _bbox(a: tuple[float, float], b: tuple[float, float],
+                  pad: float) -> tuple[float, float, float, float]:
+            x0 = max(0.0, min(a[0], b[0]) - pad)
+            y0 = max(0.0, min(a[1], b[1]) - pad)
+            x1 = min(1.0, max(a[0], b[0]) + pad)
+            y1 = min(1.0, max(a[1], b[1]) + pad)
+            w = max(ROI_MIN_SIDE, x1 - x0)
+            h = max(ROI_MIN_SIDE, y1 - y0)
+            # Re-clip after enforcing min side
+            x0 = max(0.0, min(1.0 - w, x0))
+            y0 = max(0.0, min(1.0 - h, y0))
+            return (x0, y0, w, h)
+
+        # ROI stack. Each entry is (roi, cursor_pos_at_push).
+        roi_stack: list[
+            tuple[tuple[float, float, float, float], tuple[float, float]]
+        ] = []
+        roi_stack.append((_bbox(target_aim, cursor_img, INITIAL_PAD), cursor_img))
+        print(
+            f"  [ROI servo] aim=({target_aim[0]:.2%},{target_aim[1]:.2%}) "
+            f"start_cursor=({cursor_img[0]:.2%},{cursor_img[1]:.2%}) "
+            f"root_roi={roi_stack[0][0]}"
+        )
+
+        pops_used = 0
+        confirm_count = 0
+        best_residual = math.hypot(
+            target_aim[0] - cursor_img[0], target_aim[1] - cursor_img[1],
+        )
+
+        for step in range(1, MAX_STEPS_ROI + 1):
+            roi, _ = roi_stack[-1]
+            t_step = time.monotonic()
+
+            dx_pct = target_aim[0] - cursor_img[0]
+            dy_pct = target_aim[1] - cursor_img[1]
+            residual = math.hypot(dx_pct, dy_pct)
+            if residual < best_residual:
+                best_residual = residual
+
+            if residual <= click_tol_pct:
+                confirm_count += 1
+                print(
+                    f"  [{step:02d}|R] cursor=({cursor_img[0]:.2%},"
+                    f"{cursor_img[1]:.2%}) residual={residual:.2%} "
+                    f"— confirm {confirm_count}/{confirm_frames}"
+                )
+                if confirm_count >= confirm_frames:
+                    return await self._roi_commit_click(
+                        target_aim=target_aim, target_img=target_img,
+                        cursor_img=cursor_img, button=button,
+                        click=click, click_count=click_count,
+                        run_dir=run_dir, step=step, history=history,
+                    )
+                continue
+            else:
+                confirm_count = 0
+
+            # Cruise mode: large residual → fast burst via the
+            # unchunked Pi endpoint. macOS sees a single high-velocity
+            # event and applies its high-speed accel curve, so a 220-
+            # HID burst covers much more ground than 220 chunked HID.
+            # Frame-diff in the (large) root ROI still finds the
+            # cursor post-burst because the cursor's pre/post blobs
+            # are far apart in the diff mask.
+            if residual > ROI_CRUISE_PCT and not dragging:
+                fr_x = max(
+                    RATIO_MIN,
+                    min(RATIO_MAX * 10, self._pct_per_hid_fast_x),
+                )
+                fr_y = max(
+                    RATIO_MIN,
+                    min(RATIO_MAX * 10, self._pct_per_hid_fast_y),
+                )
+                hid_dx = 0
+                hid_dy = 0
+                if abs(dx_pct) >= 1e-4:
+                    h = int(abs(dx_pct) / fr_x)
+                    h = max(MIN_HID_PER_AXIS, min(MAX_HID_PER_AXIS, h))
+                    hid_dx = h if dx_pct > 0 else -h
+                if abs(dy_pct) >= 1e-4:
+                    h = int(abs(dy_pct) / fr_y)
+                    h = max(MIN_HID_PER_AXIS, min(MAX_HID_PER_AXIS, h))
+                    hid_dy = h if dy_pct > 0 else -h
+                if axis_aligned:
+                    if abs(dx_pct) > abs(dy_pct):
+                        hid_dy = 0
+                    else:
+                        hid_dx = 0
+                pre = await self._capture_gray()
+                await self._send_hid_burst(hid_dx, hid_dy)
+                await asyncio.sleep(ROI_CRUISE_SETTLE_S)
+                post = await self._capture_gray()
+                # Predict post-burst position using FAST ratio so the
+                # disambiguator picks the right diff blob.
+                predicted = (
+                    cursor_img[0] + hid_dx * fr_x,
+                    cursor_img[1] + hid_dy * fr_y,
+                )
+                hit = self._detect_cursor_in_roi(
+                    pre, post, roi, near_pct=predicted,
+                )
+                if hit is not None:
+                    pre_cursor_pos = cursor_img
+                    cursor_img = hit[0]
+                    # Refine fast ratio from observed delta
+                    self._refine_fast_ratio(
+                        hid_dx, hid_dy,
+                        cursor_img[0] - pre_cursor_pos[0],
+                        cursor_img[1] - pre_cursor_pos[1],
+                    )
+                    # Tighten ROI (same as closed-loop branch)
+                    new_roi = _bbox(target_aim, cursor_img, PUSH_PAD)
+                    cur_area = roi[2] * roi[3]
+                    new_area = new_roi[2] * new_roi[3]
+                    if new_area < cur_area * 0.85:
+                        roi_stack.append((new_roi, cursor_img))
+                    elapsed = time.monotonic() - t_step
+                    print(
+                        f"  [{step:02d}|>] cruise hid=({hid_dx:+4d},"
+                        f"{hid_dy:+4d}) cursor→({cursor_img[0]:.2%},"
+                        f"{cursor_img[1]:.2%}) resid={residual:.2%} "
+                        f"fr=({self._pct_per_hid_fast_x*1000:.3f},"
+                        f"{self._pct_per_hid_fast_y*1000:.3f})‰ "
+                        f"stack={len(roi_stack)} {elapsed:.2f}s"
+                    )
+                    continue
+                # Cruise burst missed in ROI — fall through to
+                # chunked closed-loop refinement below.
+
+            # Axis-aligned mode: zero the smaller-residual axis so the
+            # cursor moves in an L-shape (no diagonal sweep across
+            # sibling UI elements).
+            hid_dx, hid_dy = self._hid_for_residual(dx_pct, dy_pct)
+            if axis_aligned:
+                if abs(dx_pct) > abs(dy_pct):
+                    hid_dy = 0
+                else:
+                    hid_dx = 0
+
+            pre = await self._capture_gray()
+            await self._send_hid(hid_dx, hid_dy)
+            await asyncio.sleep(ROI_SETTLE_SEC)
+            post = await self._capture_gray()
+
+            # Predict where the cursor SHOULD have landed (open-loop
+            # estimate from the homer's current ratio). Used to
+            # disambiguate the pre/post blobs from the frame-diff.
+            predicted = (
+                cursor_img[0] + hid_dx * self._pct_per_hid_x,
+                cursor_img[1] + hid_dy * self._pct_per_hid_y,
+            )
+
+            hit = self._detect_cursor_in_roi(
+                pre, post, roi, near_pct=predicted,
+            )
+            if hit is None:
+                # Cursor escaped this ROI. Pop to the previous larger
+                # ROI and retry detection there. Don't push smaller —
+                # we lost track once.
+                if len(roi_stack) > 1 and pops_used < MAX_POP_DEPTH_PER_RUN:
+                    roi_stack.pop()
+                    pops_used += 1
+                    bigger_roi, restored_cursor = roi_stack[-1]
+                    # Re-attempt detection inside the bigger ROI.
+                    hit_retry = self._detect_cursor_in_roi(
+                        pre, post, bigger_roi, near_pct=predicted,
+                    )
+                    if hit_retry is not None:
+                        cursor_img = hit_retry[0]
+                        print(
+                            f"  [{step:02d}|↑] cursor escaped — popped to "
+                            f"larger ROI; refound at ({cursor_img[0]:.2%},"
+                            f"{cursor_img[1]:.2%})"
+                        )
+                        continue
+                    # Still missing — restore cursor_img to the
+                    # last-known good position and try smaller hid
+                    # next iteration.
+                    cursor_img = restored_cursor
+                    print(
+                        f"  [{step:02d}|↑] cursor escaped — popped, "
+                        f"detection failed too; restoring cursor=({cursor_img[0]:.2%},"
+                        f"{cursor_img[1]:.2%}) and continuing"
+                    )
+                    continue
+                # Stack at root, or we've popped too many times — give
+                # the legacy oscillation re-localize a turn.
+                print(
+                    f"  [{step:02d}|?] root ROI detection failed "
+                    f"(pops={pops_used}) — oscillation re-localize"
+                )
+                relocated = await self._find_cursor_via_oscillation(
+                    run_dir, label=f"step{step:02d}_relocate",
+                )
+                if relocated is not None:
+                    cursor_img = relocated
+                    # Rebuild ROI stack from scratch around new cursor.
+                    roi_stack = [
+                        (_bbox(target_aim, cursor_img, INITIAL_PAD), cursor_img),
+                    ]
+                    pops_used = 0
+                else:
+                    print(
+                        "  [ROI servo] oscillation re-localize failed — "
+                        "best-effort click at last-known cursor"
+                    )
+                    break
+                continue
+
+            new_cursor, blob_area = hit
+            cursor_img = new_cursor
+
+            # Push a tighter ROI. The new ROI bounds the aim and the
+            # predicted next cursor position (where we expect to end
+            # up after the next step). Padded so micro-overshoots
+            # stay inside.
+            new_roi = _bbox(target_aim, cursor_img, PUSH_PAD)
+            # Don't push if the new ROI isn't actually tighter than
+            # the current one — avoids stack growth on no-progress.
+            cur_area = roi[2] * roi[3]
+            new_area = new_roi[2] * new_roi[3]
+            if new_area < cur_area * 0.85:
+                roi_stack.append((new_roi, cursor_img))
+
+            elapsed = time.monotonic() - t_step
+            print(
+                f"  [{step:02d}|R] hid=({hid_dx:+4d},{hid_dy:+4d}) "
+                f"cursor→({cursor_img[0]:.2%},{cursor_img[1]:.2%}) "
+                f"resid={residual:.2%} "
+                f"roi=({roi[0]:.2%},{roi[1]:.2%},{roi[2]:.2%}×{roi[3]:.2%}) "
+                f"stack={len(roi_stack)} blob={blob_area}px {elapsed:.2f}s"
+            )
+
+        # Loop exited without geometric_confirm. Best-effort click at
+        # whatever cursor position we last saw — matches legacy
+        # behaviour.
+        print(
+            f"  [ROI servo] exhausted budget. best_residual={best_residual:.2%}; "
+            f"falling back to best-effort click"
+        )
+        return await self._roi_commit_click(
+            target_aim=target_aim, target_img=target_img,
+            cursor_img=cursor_img, button=button,
+            click=click, click_count=click_count,
+            run_dir=run_dir, step=MAX_STEPS_ROI, history=history,
+            best_effort=True,
+        )
+
+    async def _roi_commit_click(
+        self, *, target_aim, target_img, cursor_img, button, click,
+        click_count, run_dir, step, history,
+        best_effort: bool = False,
+    ) -> ClickOutcome:
+        """Fire the click + multi-click extras inside the geometric-
+        confirm window, capture proof, return. Mirrors the equivalent
+        sequence in the legacy _servo_loop's confirm block — shared
+        here so the ROI servo doesn't have to reimplement the count>1
+        + proof-capture + history-record machinery.
+        """
+        if click:
+            await self._session._executor._mouse.click(button)
+            for _ in range(1, click_count):
+                await asyncio.sleep(0.08)
+                try:
+                    await self._session._executor._mouse.click(button)
+                except Exception:
+                    break
+        try:
+            await asyncio.sleep(0.4)
+            proof = await self._capture_proof(run_dir, step * 100)
+        except Exception:
+            proof = None
+        residual = math.hypot(
+            target_aim[0] - cursor_img[0], target_aim[1] - cursor_img[1],
+        )
+        _record_step(run_dir, history, StepRecord(
+            cursor_img=cursor_img, target_img=target_img,
+            residual_pct=residual, hid_dx=0, hid_dy=0,
+            ratio_x=self._pct_per_hid_x,
+            ratio_y=self._pct_per_hid_y,
+            note="roi_servo;best_effort" if best_effort else "roi_servo;geometric",
+        ), platform=self._platform_name)
+        return ClickOutcome(
+            clicked=True, steps=step,
+            reason="best_effort" if best_effort else "geometric_confirm",
+            proof_path=proof, history=history,
+        )
 
     def _hid_for_residual(
         self, dx_pct: float, dy_pct: float,
