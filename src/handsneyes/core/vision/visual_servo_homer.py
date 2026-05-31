@@ -1281,17 +1281,33 @@ class VisualServoHomer:
         await self._send_hid(hid_x, hid_y)
         await asyncio.sleep(0.35)
 
-        # 5. Localize cursor via frame-diff. Pre-bulk had cursor at
-        #    corner; post-bulk has it somewhere on screen. The diff
-        #    has TWO blobs (cursor at corner where it WAS, cursor
-        #    near target where it IS NOW). The disambiguator picks
-        #    the one nearest the predicted post-bulk position
-        #    (= the user's target). Falls back to oscillation if
-        #    diff localization fails.
+        # 5. Iterative corrective bursts with re-localize. PRE stays
+        #    pinned to the post-slam frame (cursor hotspot at (0,0))
+        #    so each iteration's diff has a strong corner-blob +
+        #    current-cursor-blob signal; the disambiguator picks the
+        #    one nearest the target. We measure cursor CENTROID via
+        #    diff and subtract the calibrated/static hotspot offset
+        #    to get the hotspot's actual position — without that
+        #    subtraction we'd be aiming the centroid at the target,
+        #    putting the hotspot offset_x/offset_y away from where
+        #    the operator clicked.
+        #
+        #    Tight stop threshold (CLICK_TOL_OPENLOOP) and per-axis
+        #    clamping prevent overshoot on the corrective bursts.
         target_aim = (x_pct, y_pct)
         cursor_img = (x_pct, y_pct)  # open-loop assumption
-        measured: tuple[float, float] | None = None
-        if pre_bulk is not None:
+        hot_x, hot_y = self._hotspot_offset_pct()
+
+        CLICK_TOL_OPENLOOP = 0.004      # 0.4 % ≈ 8 px on 1920w
+        MAX_CORRECTIONS = 4
+        # Clamp per axis so a single mis-localize can't fling the
+        # cursor across the screen. 400 HID ≈ 8 % at typical ratios.
+        CORRECTION_HID_CLAMP = 400
+
+        last_residual = None
+        for it in range(MAX_CORRECTIONS):
+            if pre_bulk is None:
+                break  # no pre-frame to diff against
             try:
                 post_bulk = await self._capture_gray()
                 hit = self._detect_cursor_in_roi(
@@ -1299,49 +1315,76 @@ class VisualServoHomer:
                     (0.0, 0.0, 1.0, 1.0),
                     near_pct=target_aim,
                 )
-                if hit is not None:
-                    measured = hit[0]
+                measured = hit[0] if hit is not None else None
             except Exception:
                 measured = None
-        if measured is None:
-            # Diff didn't isolate the cursor — try oscillation.
-            try:
-                measured = await self._find_cursor_via_oscillation(
-                    run_dir, label="openloop_post_bulk",
-                )
-            except Exception:
-                measured = None
-        if measured is not None:
-            cursor_img = measured
-            dx_pct = target_aim[0] - cursor_img[0]
-            dy_pct = target_aim[1] - cursor_img[1]
-            residual = math.hypot(dx_pct, dy_pct)
-            if residual > 0.010:
-                hid_dx = int(dx_pct / rx)
-                hid_dy = int(dy_pct / ry)
-                hid_dx = max(-400, min(400, hid_dx))
-                hid_dy = max(-400, min(400, hid_dy))
-                if hid_dx != 0 or hid_dy != 0:
-                    await self._send_hid(hid_dx, hid_dy)
-                    await asyncio.sleep(0.20)
+            if measured is None:
+                # First iteration only: try oscillation as a one-time
+                # fallback (slow — leaves cursor moved — so only do it
+                # when we have no diff signal at all).
+                if it == 0:
+                    try:
+                        measured = await self._find_cursor_via_oscillation(
+                            run_dir, label="openloop_post_bulk",
+                        )
+                    except Exception:
+                        measured = None
+                if measured is None:
                     print(
-                        f"  Post-bulk correction: cursor=({cursor_img[0]:.2%},"
-                        f"{cursor_img[1]:.2%}) residual={residual:.2%} → "
-                        f"hid=({hid_dx:+d},{hid_dy:+d})  (no re-verify; "
-                        f"trusts calibrated ratio)"
+                        f"  Iter {it}: localize failed — committing at "
+                        f"open-loop assumption"
                     )
-                    cursor_img = target_aim  # assumed post-correction
+                    break
+
+            # Convert measured CENTROID to HOTSPOT position so we
+            # compute the residual against the operator's intended
+            # click point in hotspot-space.
+            hotspot_pct = (measured[0] - hot_x, measured[1] - hot_y)
+            cursor_img = hotspot_pct
+            dx_pct = target_aim[0] - hotspot_pct[0]
+            dy_pct = target_aim[1] - hotspot_pct[1]
+            residual = math.hypot(dx_pct, dy_pct)
+            last_residual = residual
+
+            if residual <= CLICK_TOL_OPENLOOP:
+                print(
+                    f"  Iter {it}: hotspot=({hotspot_pct[0]:.2%},"
+                    f"{hotspot_pct[1]:.2%}) residual={residual:.2%} — "
+                    f"within tol, clicking"
+                )
+                break
+
+            hid_dx = int(dx_pct / rx)
+            hid_dy = int(dy_pct / ry)
+            hid_dx = max(-CORRECTION_HID_CLAMP, min(CORRECTION_HID_CLAMP, hid_dx))
+            hid_dy = max(-CORRECTION_HID_CLAMP, min(CORRECTION_HID_CLAMP, hid_dy))
+            if hid_dx == 0 and hid_dy == 0:
+                # Residual is non-zero but below 1 HID; can't reduce
+                # further. Accept.
+                print(
+                    f"  Iter {it}: residual={residual:.2%} sub-HID, "
+                    f"clicking"
+                )
+                break
+            print(
+                f"  Iter {it}: hotspot=({hotspot_pct[0]:.2%},"
+                f"{hotspot_pct[1]:.2%}) residual={residual:.2%} → "
+                f"hid=({hid_dx:+d},{hid_dy:+d})"
+            )
+            await self._send_hid(hid_dx, hid_dy)
+            await asyncio.sleep(0.18)
+        else:
+            # Exhausted MAX_CORRECTIONS without converging.
+            if last_residual is not None:
+                print(
+                    f"  Openloop: hit {MAX_CORRECTIONS} iters without "
+                    f"convergence (last residual={last_residual:.2%})"
+                )
             else:
                 print(
-                    f"  Post-bulk: cursor=({cursor_img[0]:.2%},"
-                    f"{cursor_img[1]:.2%}) residual={residual:.2%} — "
-                    f"within 1 %%, clicking directly"
+                    f"  Openloop: hit {MAX_CORRECTIONS} iters, "
+                    f"residual unmeasured"
                 )
-        else:
-            print(
-                "  Post-bulk localize failed — committing at "
-                "open-loop assumption"
-            )
 
         # 5. Click.
         if click:
