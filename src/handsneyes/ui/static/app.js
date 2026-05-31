@@ -627,13 +627,18 @@ const $unlockCancel = document.getElementById("unlock-modal-cancel");
 const $unlockSubmit = document.getElementById("unlock-modal-submit");
 const $unlockTabVault = document.getElementById("unlock-tab-vault");
 const $unlockTabDirect = document.getElementById("unlock-tab-direct");
+const $unlockTabAdd = document.getElementById("unlock-tab-add");
 const $unlockTabCreate = document.getElementById("unlock-tab-create");
 const $unlockPaneVault = document.getElementById("unlock-pane-vault");
 const $unlockPaneDirect = document.getElementById("unlock-pane-direct");
+const $unlockPaneAdd = document.getElementById("unlock-pane-add");
 const $unlockPaneCreate = document.getElementById("unlock-pane-create");
 const $unlockVaultName = document.getElementById("unlock-vault-name");
 const $unlockVaultPass = document.getElementById("unlock-vault-pass");
 const $unlockDirectPass = document.getElementById("unlock-direct-pass");
+const $unlockAddPass = document.getElementById("unlock-add-pass");
+const $unlockAddEntryName = document.getElementById("unlock-add-entry-name");
+const $unlockAddEntryValue = document.getElementById("unlock-add-entry-value");
 const $unlockCreatePass1 = document.getElementById("unlock-create-pass1");
 const $unlockCreatePass2 = document.getElementById("unlock-create-pass2");
 const $unlockCreateEntryName = document.getElementById("unlock-create-entry-name");
@@ -677,20 +682,25 @@ function _closeUnlockModal() {
   if ($unlockCreatePass1) $unlockCreatePass1.value = "";
   if ($unlockCreatePass2) $unlockCreatePass2.value = "";
   if ($unlockCreateEntryValue) $unlockCreateEntryValue.value = "";
+  if ($unlockAddPass) $unlockAddPass.value = "";
+  if ($unlockAddEntryValue) $unlockAddEntryValue.value = "";
 }
 
 function _setUnlockMode(mode) {
   _unlockMode = mode;
   $unlockTabVault.classList.toggle("active", mode === "vault");
   $unlockTabDirect.classList.toggle("active", mode === "direct");
+  if ($unlockTabAdd) $unlockTabAdd.classList.toggle("active", mode === "add");
   if ($unlockTabCreate) $unlockTabCreate.classList.toggle("active", mode === "create");
   $unlockPaneVault.classList.toggle("hidden", mode !== "vault");
   $unlockPaneDirect.classList.toggle("hidden", mode !== "direct");
+  if ($unlockPaneAdd) $unlockPaneAdd.classList.toggle("hidden", mode !== "add");
   if ($unlockPaneCreate) $unlockPaneCreate.classList.toggle("hidden", mode !== "create");
 }
 
 if ($unlockTabVault) $unlockTabVault.addEventListener("click", () => _setUnlockMode("vault"));
 if ($unlockTabDirect) $unlockTabDirect.addEventListener("click", () => _setUnlockMode("direct"));
+if ($unlockTabAdd) $unlockTabAdd.addEventListener("click", () => _setUnlockMode("add"));
 if ($unlockTabCreate) $unlockTabCreate.addEventListener("click", () => _setUnlockMode("create"));
 if ($unlockClose) $unlockClose.addEventListener("click", _closeUnlockModal);
 if ($unlockCancel) $unlockCancel.addEventListener("click", _closeUnlockModal);
@@ -698,6 +708,68 @@ if ($unlockCancel) $unlockCancel.addEventListener("click", _closeUnlockModal);
 async function _submitUnlock() {
   const skipVerify = !!($unlockSkipVerify && $unlockSkipVerify.checked);
   _unlockSkipVerifyDefault = skipVerify;  // session-sticky
+
+  // ── add-to-vault tab ───────────────────────────────────────
+  // Adds a single new entry to the EXISTING vault and then fires
+  // the unlock run using that entry. Non-destructive — other
+  // entries are preserved.
+  if (_unlockMode === "add") {
+    const pass = $unlockAddPass.value;
+    const entryName = ($unlockAddEntryName.value || "").trim();
+    const entryValue = $unlockAddEntryValue.value;
+    if (!pass) {
+      appendSystemLog("ERROR", "Unlock: existing vault passphrase required");
+      return;
+    }
+    if (!entryName) {
+      appendSystemLog("ERROR", "Unlock: entry name required");
+      return;
+    }
+    if (!entryValue) {
+      appendSystemLog("ERROR", "Unlock: entry value required");
+      return;
+    }
+    appendSystemLog("INFO", `adding entry "${entryName}" to vault…`);
+    try {
+      const r = await fetch("/api/vault/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          passphrase: pass,
+          entry_name: entryName,
+          entry_value: entryValue,
+        }),
+      });
+      if (!r.ok) {
+        const t = await r.text().catch(() => "");
+        appendSystemLog("ERROR", `vault add failed: ${r.status} ${t}`);
+        return;
+      }
+      const data = await r.json();
+      appendSystemLog(
+        "INFO",
+        `vault entry "${data.entry_name}" added (vault now has: ${
+          (data.entries || []).join(", ")
+        })`,
+      );
+    } catch (e) {
+      appendSystemLog("ERROR", `vault add error: ${e}`);
+      return;
+    }
+    _vaultPassphraseCache = pass;
+    if ($optVault) $optVault.value = entryName;
+    _closeUnlockModal();
+    startRun({
+      intent: "unlock the screen",
+      no_focus: true,
+      dry_run: $optDryRun.checked,
+      platform: $optPlatform.value,
+      vault: entryName,
+      vault_passphrase: pass,
+      skip_verify: skipVerify,
+    }, "unlock the screen");
+    return;
+  }
 
   // ── create-vault tab ───────────────────────────────────────
   if (_unlockMode === "create") {

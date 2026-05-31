@@ -208,6 +208,17 @@ class VaultCreateRequest(BaseModel):
     overwrite: bool = False
 
 
+class VaultAddRequest(BaseModel):
+    # Existing master passphrase. Required to decrypt the vault and
+    # then re-encrypt it with the new entry added.
+    passphrase: str = Field(min_length=1, max_length=512)
+    # New entry name + value to add. If an entry with this name
+    # already exists in the vault it is REPLACED (same semantics as
+    # `handsneyes vault add NAME` from the CLI).
+    entry_name: str = Field(min_length=1, max_length=128)
+    entry_value: str = Field(min_length=1, max_length=4096)
+
+
 class VaultUnlockSessionRequest(BaseModel):
     # Master passphrase for the vault. Cached in app.state for the
     # cc process lifetime; lets later /api/keyboard/from-vault calls
@@ -2132,6 +2143,45 @@ def create_app(
             "ok": True,
             "path": str(path),
             "entry_name": req.entry_name,
+        })
+
+    @app.post("/api/vault/add")
+    async def vault_add(req: VaultAddRequest) -> JSONResponse:
+        """Add a new entry to an EXISTING vault.
+
+        Validates the passphrase by opening the vault, then writes
+        the new entry alongside whatever else was there. Used by
+        the cc UI's "Add to vault" tab in the Unlock modal so an
+        operator can store an extra credential without dropping to
+        `handsneyes vault add` on the CLI. Existing entries are
+        preserved; an entry with the same name is replaced.
+        """
+        if runner.is_busy():
+            raise HTTPException(409, "a run is currently in progress")
+        from handsneyes.core.vault import Vault, VaultPassphraseError
+        try:
+            vault = Vault(req.passphrase)
+            # Touch a list/read to force a decrypt — Vault is lazy
+            # and a wrong passphrase would otherwise only surface
+            # on .set/.save below.
+            vault.names()
+            vault.set(req.entry_name, req.entry_value)
+        except VaultPassphraseError:
+            raise HTTPException(401, "vault passphrase rejected")
+        except FileNotFoundError:
+            raise HTTPException(
+                404,
+                "no vault file — create one via /api/vault/create first",
+            )
+        except Exception as e:
+            raise HTTPException(502, f"vault add failed: {e}")
+        # Cache the verified passphrase for the cc session so
+        # subsequent /api/keyboard/from-vault calls don't re-prompt.
+        app.state.vault_passphrase = req.passphrase
+        return JSONResponse({
+            "ok": True,
+            "entry_name": req.entry_name,
+            "entries": vault.names(),
         })
 
     @app.post("/api/vault/unlock-session")

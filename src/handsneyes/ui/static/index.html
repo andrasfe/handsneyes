@@ -182,6 +182,7 @@
         <div class="unlock-tabs">
           <button id="unlock-tab-vault" type="button" class="unlock-tab active">via vault</button>
           <button id="unlock-tab-direct" type="button" class="unlock-tab">type directly</button>
+          <button id="unlock-tab-add" type="button" class="unlock-tab">add to vault</button>
           <button id="unlock-tab-create" type="button" class="unlock-tab">create new vault</button>
         </div>
         <div id="unlock-pane-vault" class="unlock-pane">
@@ -205,6 +206,23 @@
           <p class="modal-hint">
             Typed only — never persisted, never written to disk,
             redacted from /api/runs.
+          </p>
+        </div>
+        <div id="unlock-pane-add" class="unlock-pane hidden">
+          <label class="modal-label">Existing vault master passphrase
+            <input id="unlock-add-pass" type="password" autocomplete="off" />
+          </label>
+          <label class="modal-label">New entry name
+            <input id="unlock-add-entry-name" type="text" autocomplete="off" />
+          </label>
+          <label class="modal-label">Value to store under this entry
+            <input id="unlock-add-entry-value" type="password" autocomplete="off" />
+          </label>
+          <p class="modal-hint">
+            Adds a single entry to the existing vault at
+            ~/.config/handsneyes/vault.enc. Other entries are
+            preserved. An entry with the same name will be replaced.
+            On success, the unlock run fires using this new entry.
           </p>
         </div>
         <div id="unlock-pane-create" class="unlock-pane hidden">
