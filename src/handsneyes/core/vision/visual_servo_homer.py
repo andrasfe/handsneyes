@@ -1734,10 +1734,12 @@ class VisualServoHomer:
 
         pops_used = 0
         confirm_count = 0
-        # Tracks consecutive root-ROI detection failures (no blob in
-        # ROI, escape-pop also failed). Drives the no-slam "trust
-        # the cache" fast-bail below.
         consec_relocalize_fails = 0
+        # Cruise disable latch — once cruise lands the cursor at a
+        # screen edge in this servo loop, the fast-ratio is unreliable
+        # (every refinement sample from that point is edge-clamped).
+        # Stay on chunked closed-loop for the remainder of this loop.
+        cruise_disabled_this_run = False
         best_residual = math.hypot(
             target_aim[0] - cursor_img[0], target_aim[1] - cursor_img[1],
         )
@@ -1925,7 +1927,11 @@ class VisualServoHomer:
             # Frame-diff in the (large) root ROI still finds the
             # cursor post-burst because the cursor's pre/post blobs
             # are far apart in the diff mask.
-            if residual > ROI_CRUISE_PCT and not dragging:
+            if (
+                residual > ROI_CRUISE_PCT
+                and not dragging
+                and not cruise_disabled_this_run
+            ):
                 fr_x = max(
                     RATIO_MIN,
                     min(RATIO_MAX * 10, self._pct_per_hid_fast_x),
@@ -1965,12 +1971,39 @@ class VisualServoHomer:
                 if hit is not None:
                     pre_cursor_pos = cursor_img
                     cursor_img = hit[0]
-                    # Refine fast ratio from observed delta
-                    self._refine_fast_ratio(
-                        hid_dx, hid_dy,
-                        cursor_img[0] - pre_cursor_pos[0],
-                        cursor_img[1] - pre_cursor_pos[1],
+                    # Refine fast ratio from observed delta, UNLESS
+                    # the cursor ended up at a screen edge — those
+                    # measurements are clamped by macOS at (0, 0) or
+                    # (1, 1), so the observed delta is TRUNCATED and
+                    # the resulting ratio is artificially low. A
+                    # too-low ratio then makes the next cruise burst
+                    # over-fire (compute hid = residual/ratio, hit
+                    # MAX_HID, cursor flies to the opposite edge,
+                    # measurement clamps again — the loop we just
+                    # debugged from the trace). Skip refinement when
+                    # the cursor landed within EDGE_BAND of any side.
+                    EDGE_BAND = 0.03
+                    at_edge = (
+                        cursor_img[0] < EDGE_BAND
+                        or cursor_img[0] > 1.0 - EDGE_BAND
+                        or cursor_img[1] < EDGE_BAND
+                        or cursor_img[1] > 1.0 - EDGE_BAND
                     )
+                    if not at_edge:
+                        self._refine_fast_ratio(
+                            hid_dx, hid_dy,
+                            cursor_img[0] - pre_cursor_pos[0],
+                            cursor_img[1] - pre_cursor_pos[1],
+                        )
+                    else:
+                        cruise_disabled_this_run = True
+                        print(
+                            f"  [{step:02d}|>] cruise landed cursor at "
+                            f"edge ({cursor_img[0]:.2%},{cursor_img[1]:.2%}) "
+                            f"— skipping fast-ratio refinement AND "
+                            f"disabling cruise for remainder of this "
+                            f"run (chunked-only from here)"
+                        )
                     # Tighten ROI (same as closed-loop branch)
                     new_roi = _bbox(target_aim, cursor_img, PUSH_PAD)
                     cur_area = roi[2] * roi[3]
