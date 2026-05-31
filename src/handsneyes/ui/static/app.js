@@ -127,6 +127,7 @@ const $optPlatform = document.getElementById("opt-platform");
 const $optVault = document.getElementById("opt-vault");
 const $btnLock = document.getElementById("btn-lock");
 const $btnUnlock = document.getElementById("btn-unlock");
+const $btnTypeSecret = document.getElementById("btn-type-secret");
 const $btnExecScript = document.getElementById("btn-exec-script");
 const $execModal = document.getElementById("exec-modal");
 const $execScriptBody = document.getElementById("exec-script-body");
@@ -644,14 +645,57 @@ const $unlockCreatePass2 = document.getElementById("unlock-create-pass2");
 const $unlockCreateEntryName = document.getElementById("unlock-create-entry-name");
 const $unlockCreateEntryValue = document.getElementById("unlock-create-entry-value");
 const $unlockSkipVerify = document.getElementById("unlock-skip-verify");
+const $unlockModalTitle = document.getElementById("unlock-modal-title");
+const $unlockSkipVerifyLabel = document.getElementById("unlock-skip-verify-label");
+const $unlockAppendEnterRow = document.getElementById("unlock-append-enter-row");
+const $unlockAppendEnter = document.getElementById("unlock-append-enter");
 
-let _unlockMode = "vault";   // "vault" | "direct"
+let _unlockMode = "vault";   // "vault" | "direct" | "add" | "create"
+// Modal purpose: "unlock" runs the controller's unlock intent;
+// "type-secret" types a vault entry / direct value at the host's
+// currently-focused field (operator positions the cursor first by
+// clicking into the desired input).
+let _modalPurpose = "unlock";
 
 // Session-sticky state for the modal.
 let _unlockSkipVerifyDefault = false;
+let _appendEnterDefault = false;
 
-function _openUnlockModal() {
+function _openUnlockModal(purpose) {
   if (!$unlockModal) return;
+  _modalPurpose = purpose === "type-secret" ? "type-secret" : "unlock";
+  // Adapt the chrome to the chosen purpose. The same modal serves
+  // two flows: unlock-screen vs type-secret-at-cursor. The 4 tabs
+  // (vault / direct / add / create) behave identically — only the
+  // final action differs.
+  if ($unlockModalTitle) {
+    $unlockModalTitle.textContent = (_modalPurpose === "type-secret")
+      ? "Type Secret — supply value"
+      : "Unlock — supply password";
+  }
+  if ($unlockSubmit) {
+    $unlockSubmit.textContent = (_modalPurpose === "type-secret")
+      ? "Type"
+      : "Unlock";
+  }
+  if ($unlockSkipVerifyLabel) {
+    // The "skip verify" toggle is meaningful for unlock (whether the
+    // controller runs the visual login-screen check before typing);
+    // for type-secret there's no verify step, so hide the row.
+  }
+  if ($unlockSkipVerify) {
+    $unlockSkipVerify.parentElement.classList.toggle(
+      "hidden", _modalPurpose === "type-secret",
+    );
+  }
+  if ($unlockAppendEnterRow) {
+    // The "press Enter" toggle is only relevant for type-secret —
+    // unlock runs through the controller agent which decides Enter
+    // submission itself.
+    $unlockAppendEnterRow.classList.toggle(
+      "hidden", _modalPurpose !== "type-secret",
+    );
+  }
   $unlockVaultName.value = ($optVault.value || "").trim() || "desktop";
   // Pre-fill vault passphrase from cache as a convenience, but the
   // operator can edit / clear it. We never skip the modal — that
@@ -661,6 +705,7 @@ function _openUnlockModal() {
   $unlockVaultPass.value = _vaultPassphraseCache || "";
   $unlockDirectPass.value = "";
   if ($unlockSkipVerify) $unlockSkipVerify.checked = _unlockSkipVerifyDefault;
+  if ($unlockAppendEnter) $unlockAppendEnter.checked = _appendEnterDefault;
   _setUnlockMode(_unlockMode);
   $unlockModal.classList.remove("hidden");
   $unlockModal.setAttribute("aria-hidden", "false");
@@ -705,9 +750,89 @@ if ($unlockTabCreate) $unlockTabCreate.addEventListener("click", () => _setUnloc
 if ($unlockClose) $unlockClose.addEventListener("click", _closeUnlockModal);
 if ($unlockCancel) $unlockCancel.addEventListener("click", _closeUnlockModal);
 
+// Helpers for the type-secret path. Both reuse the cc /api/keyboard
+// endpoints — no controller agent, no run lifecycle. The operator has
+// already positioned the cursor by clicking into the target input.
+async function _typeSecretFromVault(entry, passphrase, appendEnter) {
+  // 1) Cache the passphrase server-side so /api/keyboard/from-vault
+  //    can decrypt without re-prompting.
+  try {
+    const r1 = await fetch("/api/vault/unlock-session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ passphrase }),
+    });
+    if (!r1.ok) {
+      const t = await r1.text().catch(() => "");
+      appendSystemLog(
+        "ERROR", `vault unlock failed: ${r1.status} ${t}`,
+      );
+      return false;
+    }
+  } catch (e) {
+    appendSystemLog("ERROR", `vault unlock error: ${e}`);
+    return false;
+  }
+  // 2) Type the entry's value at the host's focused field.
+  try {
+    const r2 = await fetch("/api/keyboard/from-vault", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ entry, append_enter: !!appendEnter }),
+    });
+    if (!r2.ok) {
+      const t = await r2.text().catch(() => "");
+      appendSystemLog(
+        "ERROR", `type-secret failed: ${r2.status} ${t}`,
+      );
+      return false;
+    }
+    const data = await r2.json();
+    appendSystemLog(
+      "INFO",
+      `typed vault entry "${entry}" (length=${data.length}` +
+      (data.append_enter ? ", +Enter" : "") + ")",
+    );
+    return true;
+  } catch (e) {
+    appendSystemLog("ERROR", `type-secret error: ${e}`);
+    return false;
+  }
+}
+
+async function _typeSecretDirect(value, appendEnter) {
+  try {
+    const r = await fetch("/api/keyboard/text", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: value, secret: true, append_enter: !!appendEnter,
+      }),
+    });
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      appendSystemLog("ERROR", `type-secret failed: ${r.status} ${t}`);
+      return false;
+    }
+    const data = await r.json();
+    appendSystemLog(
+      "INFO",
+      `typed secret (length=${data.length}` +
+      (data.append_enter ? ", +Enter" : "") + ")",
+    );
+    return true;
+  } catch (e) {
+    appendSystemLog("ERROR", `type-secret error: ${e}`);
+    return false;
+  }
+}
+
 async function _submitUnlock() {
   const skipVerify = !!($unlockSkipVerify && $unlockSkipVerify.checked);
   _unlockSkipVerifyDefault = skipVerify;  // session-sticky
+  const appendEnter = !!($unlockAppendEnter && $unlockAppendEnter.checked);
+  _appendEnterDefault = appendEnter;
+  const isTypeSecret = (_modalPurpose === "type-secret");
 
   // ── add-to-vault tab ───────────────────────────────────────
   // Adds a single new entry to the EXISTING vault and then fires
@@ -759,15 +884,19 @@ async function _submitUnlock() {
     _vaultPassphraseCache = pass;
     if ($optVault) $optVault.value = entryName;
     _closeUnlockModal();
-    startRun({
-      intent: "unlock the screen",
-      no_focus: true,
-      dry_run: $optDryRun.checked,
-      platform: $optPlatform.value,
-      vault: entryName,
-      vault_passphrase: pass,
-      skip_verify: skipVerify,
-    }, "unlock the screen");
+    if (isTypeSecret) {
+      await _typeSecretFromVault(entryName, pass, appendEnter);
+    } else {
+      startRun({
+        intent: "unlock the screen",
+        no_focus: true,
+        dry_run: $optDryRun.checked,
+        platform: $optPlatform.value,
+        vault: entryName,
+        vault_passphrase: pass,
+        skip_verify: skipVerify,
+      }, "unlock the screen");
+    }
     return;
   }
 
@@ -824,15 +953,19 @@ async function _submitUnlock() {
     _vaultPassphraseCache = p1;
     if ($optVault) $optVault.value = entryName;
     _closeUnlockModal();
-    startRun({
-      intent: "unlock the screen",
-      no_focus: true,
-      dry_run: $optDryRun.checked,
-      platform: $optPlatform.value,
-      vault: entryName,
-      vault_passphrase: p1,
-      skip_verify: skipVerify,
-    }, "unlock the screen");
+    if (isTypeSecret) {
+      await _typeSecretFromVault(entryName, p1, appendEnter);
+    } else {
+      startRun({
+        intent: "unlock the screen",
+        no_focus: true,
+        dry_run: $optDryRun.checked,
+        platform: $optPlatform.value,
+        vault: entryName,
+        vault_passphrase: p1,
+        skip_verify: skipVerify,
+      }, "unlock the screen");
+    }
     return;
   }
 
@@ -850,15 +983,19 @@ async function _submitUnlock() {
     _vaultPassphraseCache = vp;
     if ($optVault) $optVault.value = vault;
     _closeUnlockModal();
-    startRun({
-      intent: "unlock the screen",
-      no_focus: true,
-      dry_run: $optDryRun.checked,
-      platform: $optPlatform.value,
-      vault,
-      vault_passphrase: _vaultPassphraseCache,
-      skip_verify: skipVerify,
-    }, "unlock the screen");
+    if (isTypeSecret) {
+      await _typeSecretFromVault(vault, vp, appendEnter);
+    } else {
+      startRun({
+        intent: "unlock the screen",
+        no_focus: true,
+        dry_run: $optDryRun.checked,
+        platform: $optPlatform.value,
+        vault,
+        vault_passphrase: _vaultPassphraseCache,
+        skip_verify: skipVerify,
+      }, "unlock the screen");
+    }
   } else {
     const pw = $unlockDirectPass.value;
     if (!pw) {
@@ -867,15 +1004,19 @@ async function _submitUnlock() {
     }
     if ($optVault && vault) $optVault.value = vault;
     _closeUnlockModal();
-    startRun({
-      intent: "unlock the screen",
-      no_focus: true,
-      dry_run: $optDryRun.checked,
-      platform: $optPlatform.value,
-      vault,
-      password: pw,
-      skip_verify: skipVerify,
-    }, "unlock the screen");
+    if (isTypeSecret) {
+      await _typeSecretDirect(pw, appendEnter);
+    } else {
+      startRun({
+        intent: "unlock the screen",
+        no_focus: true,
+        dry_run: $optDryRun.checked,
+        platform: $optPlatform.value,
+        vault,
+        password: pw,
+        skip_verify: skipVerify,
+      }, "unlock the screen");
+    }
   }
 }
 
@@ -913,8 +1054,21 @@ $btnUnlock.addEventListener("click", () => {
   // the modal" optimization trapped operators when the cache was
   // wrong (no way to switch to direct-password or change the
   // passphrase without reloading the page).
-  _openUnlockModal();
+  _openUnlockModal("unlock");
 });
+
+if ($btnTypeSecret) {
+  $btnTypeSecret.addEventListener("click", () => {
+    if (!$unlockModal) {
+      appendSystemLog(
+        "ERROR",
+        "Type-secret modal not found — UI assets out of date?",
+      );
+      return;
+    }
+    _openUnlockModal("type-secret");
+  });
+}
 
 // ── Execute Script modal ──────────────────────────────────────
 function openExecModal() {

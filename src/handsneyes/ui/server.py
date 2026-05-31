@@ -169,6 +169,11 @@ class MouseScrollRequest(BaseModel):
 class KeyboardTextRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4096)
     warmup: bool = False
+    # When typing a password / secret into a host field, set secret=True
+    # so the dev-side log records only the length (the Pi side already
+    # only logs the length). The cc UI's "Type Secret" button sets this.
+    secret: bool = False
+    append_enter: bool = False
 
 
 class KeyboardKeyRequest(BaseModel):
@@ -1470,8 +1475,19 @@ def create_app(
     @app.post("/api/keyboard/text")
     async def keyboard_text(req: KeyboardTextRequest) -> JSONResponse:
         async def go(kb):
-            await kb.send_text(req.text, warmup=req.warmup)
-            return JSONResponse({"ok": True, "length": len(req.text)})
+            try:
+                await kb.send_text(
+                    req.text, warmup=req.warmup, secret=req.secret,
+                )
+            except TypeError:
+                # Older backend signature without the kwargs.
+                await kb.send_text(req.text, warmup=req.warmup)
+            if req.append_enter:
+                await kb.send_keystroke("Enter")
+            return JSONResponse({
+                "ok": True, "length": len(req.text),
+                "secret": req.secret, "append_enter": req.append_enter,
+            })
         return await _with_keyboard(go)
 
     @app.post("/api/keyboard/key")

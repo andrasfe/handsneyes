@@ -101,6 +101,8 @@
                title="Vault entry name used by Unlock" />
         <button id="btn-unlock" type="button" class="quick"
                 title="Unlock the target screen using the named vault entry">Unlock</button>
+        <button id="btn-type-secret" type="button" class="quick"
+                title="Type a secret (vault entry or direct value) at the host's current focused field. Position the cursor first by clicking into the desired input.">Type Secret</button>
         <button id="btn-exec-script" type="button" class="quick"
                 title="Open a textarea, paste a shell script, run it on the target">Execute Script…</button>
         <button id="btn-retrain" type="button" class="quick"
@@ -175,7 +177,7 @@
   <div id="unlock-modal" class="modal hidden" aria-hidden="true">
     <div class="modal-card">
       <div class="modal-header">
-        <span>Unlock — supply password</span>
+        <span id="unlock-modal-title">Unlock — supply password</span>
         <button id="unlock-modal-close" type="button" title="Close">×</button>
       </div>
       <div class="modal-body">
@@ -248,7 +250,11 @@
         </div>
         <label class="modal-label" style="flex-direction: row; align-items: center; gap: 8px;">
           <input id="unlock-skip-verify" type="checkbox" />
-          <span>Skip visual verify (force-type — use when the webcam is unavailable or fooled)</span>
+          <span id="unlock-skip-verify-label">Skip visual verify (force-type — use when the webcam is unavailable or fooled)</span>
+        </label>
+        <label id="unlock-append-enter-row" class="modal-label hidden" style="flex-direction: row; align-items: center; gap: 8px;">
+          <input id="unlock-append-enter" type="checkbox" />
+          <span>Press Enter after typing (useful for password fields that submit on Enter)</span>
         </label>
       </div>
       <div class="modal-footer">
