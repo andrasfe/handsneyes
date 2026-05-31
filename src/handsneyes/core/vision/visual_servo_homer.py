@@ -463,6 +463,16 @@ class VisualServoHomer:
         # actual burst-mode accel response is.
         self._pct_per_hid_fast_x = DEFAULT_PCT_PER_HID
         self._pct_per_hid_fast_y = DEFAULT_PCT_PER_HID
+        # Open-loop ratio — calibrated against the actual single-
+        # burst send pattern (one ~thousand-HID chunked send). The
+        # learned _pct_per_hid_x from servo-loop measurements is at
+        # a different velocity regime; macOS pointer-accel responds
+        # nonlinearly to sustained streams, so the open-loop path
+        # needs its own number measured against the same kind of
+        # send it will perform at click time. None until a
+        # calibration burst has run.
+        self._pct_per_hid_openloop_x: float | None = None
+        self._pct_per_hid_openloop_y: float | None = None
         self._diff_misses_in_a_row = 0
         self._zoom_levels_applied = 0
         # If init's HSV candidate fails motion verification, disable
@@ -891,16 +901,10 @@ class VisualServoHomer:
             os.environ.get("HANDSNEYES_OPENLOOP") == "1"
             and prev_cursor_pct is None
             and not dragging
-            # Requires a learned ratio — the default seed
-            # (0.833‰) is ~5× too high for typical screen-share
-            # remote targets and an open-loop send at that
-            # ratio under-shoots dramatically. Fall back to the
-            # servo loop for the first click; it'll learn the
-            # ratio AND cache it, and the next click goes
-            # open-loop with calibrated data.
-            and abs(self._pct_per_hid_x - DEFAULT_PCT_PER_HID) > 1e-6
-            and abs(self._pct_per_hid_y - DEFAULT_PCT_PER_HID) > 1e-6
         ):
+            # Open-loop hybrid: self-calibrates the ratio against
+            # the actual openloop send pattern on first invocation,
+            # then bulk-sends and runs a short servo tail.
             return await self._home_to_pixel_openloop(
                 x_pct, y_pct, button=button, click=click,
                 click_count=click_count,
@@ -1138,32 +1142,79 @@ class VisualServoHomer:
             click_count=click_count,
         )
 
+    async def _calibrate_openloop_ratio(self, run_dir) -> bool:
+        """Measure HID→pixel ratio for the OPEN-LOOP send pattern.
+
+        Slam to corner, fire a calibration burst of N HID via the
+        same chunked path the open-loop will use at click time,
+        localise the cursor via oscillation-variance (which doesn't
+        depend on knowing the pre-burst frame and is robust on busy
+        backgrounds), derive the ratio = observed_position / N.
+        """
+        CAL_HID = 1000
+        # 1. Slam — cursor hotspot at (0, 0).
+        await self._slam_to_corner()
+        # 2. Fire the calibration burst.
+        await self._send_hid(CAL_HID, CAL_HID)
+        await asyncio.sleep(0.40)
+        # 3. Oscillation-variance to find where the cursor ended up.
+        #    Robust to background animation and to the cursor being
+        #    in the I-beam / hand state.
+        try:
+            post_cursor = await self._find_cursor_via_oscillation(
+                run_dir, label="openloop_calibrate",
+            )
+        except Exception as e:
+            print(f"  Open-loop calibration: oscillation raised {e}")
+            return False
+        if post_cursor is None:
+            print("  Open-loop calibration: oscillation couldn't localise cursor")
+            return False
+        # 4. Ratio. The pre-burst hotspot was at (0, 0); the cursor
+        #    centroid is half_cursor_size from origin so observed
+        #    post position is (CAL_HID * ratio + half_cursor_w,
+        #    CAL_HID * ratio + half_cursor_h). The half_cursor terms
+        #    are typically < 2 % each and CAL_HID * ratio is > 10 %,
+        #    so the ratio derivation has ~5 % relative error — close
+        #    enough as a starting point; the servo tail closes the
+        #    remaining gap.
+        ratio_x = max(0.0, post_cursor[0]) / CAL_HID
+        ratio_y = max(0.0, post_cursor[1]) / CAL_HID
+        if not (1e-5 < ratio_x < 0.005) or not (1e-5 < ratio_y < 0.005):
+            print(
+                f"  Open-loop calibration: derived ratio outside sanity "
+                f"bounds ({ratio_x*1000:.3f}, {ratio_y*1000:.3f})‰ — "
+                f"rejected"
+            )
+            return False
+        self._pct_per_hid_openloop_x = ratio_x
+        self._pct_per_hid_openloop_y = ratio_y
+        print(
+            f"  Open-loop calibrated: ratio=({ratio_x*1000:.3f},"
+            f"{ratio_y*1000:.3f})‰ from {CAL_HID}-HID burst → "
+            f"cursor at ({post_cursor[0]:.2%},{post_cursor[1]:.2%})"
+        )
+        return True
+
     async def _home_to_pixel_openloop(
         self,
         x_pct: float, y_pct: float,
         *, button: str, click: bool, click_count: int,
     ) -> ClickOutcome:
-        """Open-loop click. Slam → single chunked HID move → click.
+        """Hybrid open-loop + short servo tail.
 
-        Premise: the chunked HID send (MOVE_STEP_SIZE=3 with 3 ms
-        between chunks) drives the cursor at a steady-state velocity
-        where macOS pointer-accel produces a linear HID→pixel ratio.
-        We track that ratio in ``self._pct_per_hid_*`` (seeded from
-        the cc-level cache, refined over subsequent clicks).
+        Premise refined per real-world testing: macOS pointer-accel
+        responds differently to a single ~2-3 s sustained chunked
+        stream than to many tiny isolated servo steps, so the
+        servo-learned ratio doesn't extrapolate. We calibrate the
+        ratio against the OPENLOOP send pattern once per session,
+        fire a single bulk burst that gets us to within ~3-5%% of
+        the target, then run a short servo tail (~3-5 steps) to
+        close the remaining gap.
 
-        Slam clamps the cursor's HOTSPOT at host (0, 0) — that's
-        true for ANY cursor shape (arrow, hand, I-beam, crosshair),
-        which is the property the legacy servo path exploited for
-        hotspot calibration. Here we exploit it more directly: to
-        get the hotspot to land at (x_pct, y_pct), just move the
-        cursor by exactly (x_pct, y_pct) in image-percent terms.
-        No cursor-shape detection, no hotspot offset, no servo loop.
-
-        Trade-off: open-loop means no feedback. If the ratio drifts
-        or HID reports are dropped, the click lands wrong with no
-        recovery. For most hosts the chunked-rate ratio is stable
-        across sessions so this is acceptable; the visual servo
-        path stays available for hosts where it isn't.
+        Slam clamps the cursor's HOTSPOT at host (0, 0) regardless
+        of cursor shape, so moving the cursor by (x_pct, y_pct) in
+        image-percent puts the hotspot at the user's target.
         """
         from datetime import datetime
         session_out = getattr(self._session, "output_dir", None)
@@ -1175,40 +1226,105 @@ class VisualServoHomer:
             from pathlib import Path
             run_dir = Path("/tmp")
 
-        print(
-            f"  Open-loop click → ({x_pct:.2%}, {y_pct:.2%}) "
-            f"ratio=({self._pct_per_hid_x*1000:.3f},"
-            f"{self._pct_per_hid_y*1000:.3f})‰"
-        )
+        # 1. Calibrate the open-loop ratio if we haven't yet.
+        if (
+            self._pct_per_hid_openloop_x is None
+            or self._pct_per_hid_openloop_y is None
+        ):
+            ok = await self._calibrate_openloop_ratio(run_dir)
+            if not ok:
+                # Calibration failed — fall through to servo path.
+                # Re-enter home_to_pixel without the openloop flag
+                # (using prev_cursor_pct=None so it goes through the
+                # full slam-then-servo).
+                print("  Open-loop calibration failed; falling back to servo")
+                return await self._servo_loop(
+                    target_aim=(x_pct, y_pct),
+                    target_img=(x_pct, y_pct),
+                    cursor_img=(0.0, 0.0),  # post-slam corner
+                    button=button, run_dir=run_dir, history=[],
+                    target_desc="<openloop-fallback>",
+                    verify_navigation=False, last_proof=None,
+                    confirm_frames=1, click_tol_pct=0.010,
+                    click=click, axis_aligned=False, dragging=False,
+                    click_count=click_count,
+                )
 
-        # 1. Slam — hotspot clamped at (0, 0).
+        rx = self._pct_per_hid_openloop_x
+        ry = self._pct_per_hid_openloop_y
+        # 2. Slam — calibration already slammed but consumed the
+        #    cursor position via the calibration burst; re-slam so
+        #    we start the real send from a known (0, 0) hotspot.
         await self._slam_to_corner()
 
-        # 2. Compute HID delta from the chunked-rate ratio.
-        #    hid_x * ratio_x = x_pct  →  hid_x = x_pct / ratio_x
-        rx = max(RATIO_MIN, min(RATIO_MAX, self._pct_per_hid_x))
-        ry = max(RATIO_MIN, min(RATIO_MAX, self._pct_per_hid_y))
+        # 3. Fire the calibrated bulk burst.
         hid_x = int(x_pct / rx)
         hid_y = int(y_pct / ry)
-        print(f"  Sending hid=({hid_x:+d},{hid_y:+d}) (single chunked burst)")
-
-        # 3. Single chunked send via the existing _send_hid path —
-        #    same chunking the visual servo used; same ratio applies.
+        print(
+            f"  Open-loop bulk → ({x_pct:.2%}, {y_pct:.2%}) "
+            f"ratio=({rx*1000:.3f},{ry*1000:.3f})‰ "
+            f"hid=({hid_x:+d},{hid_y:+d})"
+        )
         await self._send_hid(hid_x, hid_y)
-        # Let the cursor settle on the host so the click registers at
-        # the final position (some apps focus-track during mouse
-        # movement and a click during transit lands on the wrong
-        # element).
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.35)
 
-        # 4. Click.
+        # 4. Servo tail. Capture the post-burst frame, detect cursor
+        #    via frame-diff against pre-burst, run a short servo loop
+        #    to close any residual gap. ~3-5 small steps.
+        cursor_img = (x_pct, y_pct)  # open-loop assumption
+        # The full closed-loop is expensive; instead we just do a few
+        # targeted micro-corrections analogous to the post-confirm
+        # path in the ROI servo.
+        target_aim = (x_pct, y_pct)
+        TAIL_MAX_STEPS = 6
+        TAIL_TOL = 0.010
+        for tail in range(TAIL_MAX_STEPS):
+            verified = await self._verify_cursor_via_wiggle(cursor_img)
+            if verified is None:
+                # Couldn't localise. Trust open-loop and commit.
+                break
+            cursor_img = verified
+            v_resid = math.hypot(
+                target_aim[0] - verified[0],
+                target_aim[1] - verified[1],
+            )
+            if v_resid <= TAIL_TOL:
+                print(
+                    f"  Tail step {tail+1}: cursor=({verified[0]:.2%},"
+                    f"{verified[1]:.2%}) residual={v_resid:.2%} ≤ "
+                    f"{TAIL_TOL:.1%} — done"
+                )
+                break
+            # Compute corrective HID using the OPENLOOP-calibrated
+            # ratio (the burst-rate ratio). Small-HID corrections
+            # fall into the pointer-accel dead zone where each HID
+            # produces ~10× less movement than the calibrated ratio
+            # predicts — so we deliberately keep corrections in the
+            # MEDIUM-magnitude regime where the calibration applies.
+            # Clamped to ±400 so we don't overshoot dramatically.
+            dx_pct = target_aim[0] - cursor_img[0]
+            dy_pct = target_aim[1] - cursor_img[1]
+            hid_dx = int(dx_pct / rx)
+            hid_dy = int(dy_pct / ry)
+            hid_dx = max(-400, min(400, hid_dx))
+            hid_dy = max(-400, min(400, hid_dy))
+            if hid_dx == 0 and hid_dy == 0:
+                break
+            await self._send_hid(hid_dx, hid_dy)
+            await asyncio.sleep(0.15)
+            print(
+                f"  Tail step {tail+1}: cursor=({verified[0]:.2%},"
+                f"{verified[1]:.2%}) residual={v_resid:.2%} → "
+                f"hid=({hid_dx:+d},{hid_dy:+d})"
+            )
+
+        # 5. Click.
         if click:
             try:
                 await self._session._executor._mouse.click(
                     button, count=click_count,
                 )
             except TypeError:
-                # Legacy backend without count= support.
                 await self._session._executor._mouse.click(button)
                 for _ in range(1, click_count):
                     await asyncio.sleep(0.08)
@@ -1217,7 +1333,6 @@ class VisualServoHomer:
                     except Exception:
                         break
 
-        # 5. Capture proof.
         proof: str | None = None
         try:
             await asyncio.sleep(0.35)
@@ -1227,13 +1342,9 @@ class VisualServoHomer:
 
         return ClickOutcome(
             clicked=True, steps=1,
-            reason="openloop",
+            reason="openloop_hybrid",
             proof_path=proof, history=[],
-            # We're open-loop so we don't *measure* the final cursor
-            # position — but we DROVE the cursor's hotspot to the
-            # user's target, and the marker overlay uses this
-            # value to draw the green "homer-reported" dot.
-            final_cursor_pct=(x_pct, y_pct),
+            final_cursor_pct=cursor_img,
         )
 
     async def drag_to_pixels(
