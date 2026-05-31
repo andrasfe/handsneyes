@@ -1038,9 +1038,11 @@ def create_app(
                 if cached_ratio is not None:
                     payload, rt = cached_ratio
                     if _time.time() - rt < RATIO_CACHE_TTL_S:
-                        # Backwards-compatible unpack: old caches
-                        # store 4-tuples (no hotspot); new caches
-                        # store 4 ratios + hotspot offset tuple.
+                        # Backwards-compatible unpack — the payload
+                        # has grown across versions:
+                        #   payload[0:4] = closed-loop x,y + fast x,y
+                        #   payload[4:6] = optional hotspot (x, y)
+                        #   payload[6:8] = optional openloop x, y
                         rx, ry, fx, fy = payload[:4]
                         homer._pct_per_hid_x = rx
                         homer._pct_per_hid_y = ry
@@ -1050,6 +1052,17 @@ def create_app(
                             homer._calibrated_hotspot_offset = (
                                 payload[4], payload[5],
                             )
+                        if len(payload) >= 8:
+                            # Openloop ratio is calibrated against
+                            # the full-bulk send pattern (~1000 HID
+                            # sustained chunked stream). It doesn't
+                            # extrapolate cleanly from the servo's
+                            # small-step ratio, so we cache it
+                            # separately. Loading it here lets the
+                            # 2nd-and-later openloop clicks skip
+                            # the ~3 s calibration burst entirely.
+                            homer._pct_per_hid_openloop_x = payload[6]
+                            homer._pct_per_hid_openloop_y = payload[7]
                 outcome = await homer.home_to_pixel(
                     req.x_pct, req.y_pct, button=req.button,
                     prev_cursor_pct=prev_cursor_pct,
@@ -1071,16 +1084,28 @@ def create_app(
                     # instead of EMA-converging from DEFAULT all
                     # over again.
                     hsp = homer._calibrated_hotspot_offset
+                    olx = getattr(homer, "_pct_per_hid_openloop_x", None)
+                    oly = getattr(homer, "_pct_per_hid_openloop_y", None)
+                    # Build payload: 4 mandatory ratios + optional
+                    # hotspot pair + optional openloop pair. Hotspot
+                    # is added unconditionally (with zero-tail if
+                    # absent) when openloop is present, so the
+                    # backwards-compat unpack can use len() checks.
+                    payload = (
+                        homer._pct_per_hid_x,
+                        homer._pct_per_hid_y,
+                        homer._pct_per_hid_fast_x,
+                        homer._pct_per_hid_fast_y,
+                    )
+                    if hsp is not None or (olx is not None and oly is not None):
+                        payload = payload + (
+                            hsp[0] if hsp is not None else 0.0,
+                            hsp[1] if hsp is not None else 0.0,
+                        )
+                    if olx is not None and oly is not None:
+                        payload = payload + (olx, oly)
                     app.state.last_homer_ratio_at = (
-                        (
-                            homer._pct_per_hid_x,
-                            homer._pct_per_hid_y,
-                            homer._pct_per_hid_fast_x,
-                            homer._pct_per_hid_fast_y,
-                        ) + (
-                            (hsp[0], hsp[1]) if hsp is not None else ()
-                        ),
-                        _time.time(),
+                        payload, _time.time(),
                     )
                     # Every successful click produced a fresh
                     # history.jsonl trajectory — a new training row
@@ -2677,6 +2702,45 @@ def create_app(
     # type at openapi-generation time (closure-scoped BaseModels
     # produce ForwardRef errors).
 
+    # Pointer-accel scale is persisted to ~/.config/handsneyes/
+    # pointer_accel_scale.json so it survives cc restarts. Without
+    # this every restart resets to the 1.0/1.0 default and the SPA
+    # loads the default until the operator (or a curl POST) sets
+    # it again — easy to forget after a restart, with the symptom
+    # of "clicks land way off" until you notice the UI shows 1.0.
+    from pathlib import Path as _PathScale
+    _SCALE_PATH = _PathScale.home() / ".config/handsneyes/pointer_accel_scale.json"
+
+    def _load_persisted_scale() -> tuple[float, float] | None:
+        try:
+            import json as _json
+            with open(_SCALE_PATH) as f:
+                d = _json.load(f)
+            return float(d["scale_x"]), float(d["scale_y"])
+        except Exception:
+            return None
+
+    def _save_persisted_scale(sx: float, sy: float) -> None:
+        try:
+            import json as _json
+            _SCALE_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with open(_SCALE_PATH, "w") as f:
+                _json.dump({"scale_x": sx, "scale_y": sy}, f)
+        except Exception as e:
+            logger.warning("could not persist pointer-accel-scale: %s", e)
+
+    # Bootstrap runtime_state from disk if a previous session saved
+    # a value. Runs once at server startup (this closure runs at
+    # app construction, before any request).
+    _persisted = _load_persisted_scale()
+    if _persisted is not None:
+        app.state.runtime_state["pointer_accel_scale_x"] = _persisted[0]
+        app.state.runtime_state["pointer_accel_scale_y"] = _persisted[1]
+        logger.info(
+            "pointer-accel-scale: loaded persisted x=%.3f y=%.3f",
+            _persisted[0], _persisted[1],
+        )
+
     @app.get("/api/pointer-accel-scale")
     def pointer_accel_scale_state() -> JSONResponse:
         return JSONResponse({
@@ -2698,8 +2762,9 @@ def create_app(
     ) -> JSONResponse:
         app.state.runtime_state["pointer_accel_scale_x"] = float(req.scale_x)
         app.state.runtime_state["pointer_accel_scale_y"] = float(req.scale_y)
+        _save_persisted_scale(float(req.scale_x), float(req.scale_y))
         logger.info(
-            "pointer-accel scale override → x=%.3f y=%.3f",
+            "pointer-accel scale override → x=%.3f y=%.3f (persisted)",
             req.scale_x, req.scale_y,
         )
         return JSONResponse({
