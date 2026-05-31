@@ -413,6 +413,11 @@ class ClickOutcome:
     reason: str
     proof_path: str | None = None
     history: list[StepRecord] = field(default_factory=list)
+    # Final verified cursor centroid in image-percent. Populated by
+    # commit paths after the geometric/best-effort gate fires, so
+    # callers can compare "where I aimed" vs "where homer said the
+    # cursor landed" without re-parsing history.
+    final_cursor_pct: tuple[float, float] | None = None
 
 
 class VisualServoHomer:
@@ -2451,6 +2456,7 @@ class VisualServoHomer:
             clicked=True, steps=step,
             reason="best_effort" if best_effort else "geometric_confirm",
             proof_path=proof, history=history,
+            final_cursor_pct=cursor_img,
         )
 
     def _hid_for_residual(

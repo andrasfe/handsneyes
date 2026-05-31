@@ -1096,18 +1096,94 @@ def create_app(
                     # clicks instead of a double.
                 # Drop a post-click frame at the watch-dir top level
                 # so FrameStore (one-level-deep scan) picks it up and
-                # the UI long-poll refreshes.
+                # the UI long-poll refreshes. We save THREE artefacts
+                # per click:
+                #   - <ts>_click_at.png        clean frame for training
+                #   - <ts>_click_at_marked.png same frame with a cursor-
+                #     icon overlay at the INTENDED click position, so
+                #     a human can scan a directory of proofs and see
+                #     at a glance whether the host cursor (in the
+                #     frame) and the operator's target (overlay) line
+                #     up
+                #   - <ts>_click_at.json       sidecar with the pixel
+                #     coordinates of the intended click + the homer's
+                #     verified final cursor centroid; lets future ML
+                #     work treat the proof directory as a labelled
+                #     dataset without re-parsing image overlays
                 try:
                     from datetime import datetime
                     import cv2
+                    import json
                     await asyncio.sleep(0.35)
                     frame = await capture.capture_frame()
                     out_dir = store.watch_dir / "manual"
                     out_dir.mkdir(parents=True, exist_ok=True)
                     seq = int(datetime.now().timestamp() * 1000) % 10_000
                     ts = datetime.now().strftime("%H%M%S")
-                    path = out_dir / f"{seq:04d}_{ts}_click_at.png"
-                    cv2.imwrite(str(path), frame.image)
+                    stem = f"{seq:04d}_{ts}_click_at"
+                    clean_path = out_dir / f"{stem}.png"
+                    marked_path = out_dir / f"{stem}_marked.png"
+                    json_path = out_dir / f"{stem}.json"
+                    # Clean frame first — preserve for downstream ML.
+                    cv2.imwrite(str(clean_path), frame.image)
+
+                    img = frame.image
+                    h_img, w_img = img.shape[:2]
+                    aim_px_x = int(req.x_pct * w_img)
+                    aim_px_y = int(req.y_pct * h_img)
+                    final = outcome.final_cursor_pct
+                    final_px = (
+                        (int(final[0] * w_img), int(final[1] * h_img))
+                        if final is not None else None
+                    )
+
+                    # Marker: bright cyan ring + crosshair at the
+                    # operator's INTENDED pixel. Cyan is rare in
+                    # most UI palettes so it pops against typical
+                    # backgrounds without being confusable with the
+                    # red HSV cursor accent.
+                    overlay = img.copy()
+                    CYAN = (255, 255, 0)
+                    cv2.circle(overlay, (aim_px_x, aim_px_y), 14, CYAN, 2)
+                    cv2.line(overlay, (aim_px_x - 20, aim_px_y),
+                             (aim_px_x + 20, aim_px_y), CYAN, 1)
+                    cv2.line(overlay, (aim_px_x, aim_px_y - 20),
+                             (aim_px_x, aim_px_y + 20), CYAN, 1)
+                    cv2.putText(
+                        overlay, "click", (aim_px_x + 18, aim_px_y - 14),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, CYAN, 1, cv2.LINE_AA,
+                    )
+                    # Homer's verified cursor centroid in green —
+                    # if this disagrees with the click marker, the
+                    # homer's residual was nonzero at commit.
+                    if final_px is not None:
+                        GREEN = (0, 255, 0)
+                        cv2.circle(overlay, final_px, 8, GREEN, 2)
+                        cv2.putText(
+                            overlay, "homer", (final_px[0] + 12, final_px[1] + 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 1, cv2.LINE_AA,
+                        )
+                    cv2.imwrite(str(marked_path), overlay)
+
+                    # Sidecar JSON for training.
+                    sidecar = {
+                        "ts": ts,
+                        "frame_size": [w_img, h_img],
+                        "intended_click_pct": [req.x_pct, req.y_pct],
+                        "intended_click_px": [aim_px_x, aim_px_y],
+                        "homer_final_cursor_pct": (
+                            list(final) if final is not None else None
+                        ),
+                        "homer_final_cursor_px": (
+                            list(final_px) if final_px is not None else None
+                        ),
+                        "outcome": outcome.reason,
+                        "steps": outcome.steps,
+                        "button": req.button,
+                        "count": req.count,
+                    }
+                    with open(json_path, "w") as f:
+                        json.dump(sidecar, f, indent=2)
                 except Exception as e:
                     logger.warning("post-click snapshot failed: %s", e)
                 return JSONResponse({
