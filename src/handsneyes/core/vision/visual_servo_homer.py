@@ -1781,9 +1781,73 @@ class VisualServoHomer:
                             )
                             continue
                         cursor_img = verified
+
+                        # ─── Micro-correction loop ───────────────
+                        # The tolerance gate accepts residual ≤ 1%,
+                        # but on a 27" 1080p display 1% is still ~5
+                        # mm visual error. After the wiggle confirms
+                        # we're sub-tol, do up to N tiny corrective
+                        # nudges (each followed by another wiggle-
+                        # measure) to drive residual down toward
+                        # the camera's measurement noise floor. Bail
+                        # if any measurement fails OR if a step
+                        # makes residual worse (HID undershot /
+                        # overshot due to pointer-accel nonlinearity
+                        # at small magnitudes).
+                        MICRO_PRECISION_TARGET = 0.003  # ≈ 0.6 mm
+                        MICRO_MAX_ITERS = 4
+                        prev_resid = v_resid
+                        for micro in range(MICRO_MAX_ITERS):
+                            if v_resid <= MICRO_PRECISION_TARGET:
+                                break
+                            dx_micro = target_aim[0] - cursor_img[0]
+                            dy_micro = target_aim[1] - cursor_img[1]
+                            mhid_dx, mhid_dy = self._hid_for_residual(
+                                dx_micro, dy_micro,
+                            )
+                            # Clamp to small nudges — at this point
+                            # we're chasing pixels, not percent.
+                            mhid_dx = max(-15, min(15, mhid_dx))
+                            mhid_dy = max(-15, min(15, mhid_dy))
+                            if mhid_dx == 0 and mhid_dy == 0:
+                                break
+                            await self._send_hid(mhid_dx, mhid_dy)
+                            await asyncio.sleep(0.10)
+                            re_verified = await self._verify_cursor_via_wiggle(
+                                cursor_img,
+                            )
+                            if re_verified is None:
+                                break
+                            new_resid = math.hypot(
+                                target_aim[0] - re_verified[0],
+                                target_aim[1] - re_verified[1],
+                            )
+                            # Made things worse — back out the move
+                            # (cursor is in a non-linear accel zone)
+                            # and stop micro-correcting; we'll click
+                            # at the better prior position.
+                            if new_resid > prev_resid + 0.001:
+                                await self._send_hid(-mhid_dx, -mhid_dy)
+                                await asyncio.sleep(0.08)
+                                print(
+                                    f"  [{step:02d}|µ{micro+1}] hid=({mhid_dx:+d},"
+                                    f"{mhid_dy:+d}) → resid={new_resid:.2%} > "
+                                    f"prior {prev_resid:.2%}; reverted, "
+                                    f"clicking at prior position"
+                                )
+                                break
+                            cursor_img = re_verified
+                            v_resid = new_resid
+                            prev_resid = new_resid
+                            print(
+                                f"  [{step:02d}|µ{micro+1}] hid=({mhid_dx:+d},"
+                                f"{mhid_dy:+d}) → cursor=({re_verified[0]:.2%},"
+                                f"{re_verified[1]:.2%}) residual={new_resid:.2%}"
+                            )
+
                         print(
-                            f"  [{step:02d}|V] verified: cursor=({verified[0]:.2%},"
-                            f"{verified[1]:.2%}) residual={v_resid:.2%}"
+                            f"  [{step:02d}|V] verified: cursor=({cursor_img[0]:.2%},"
+                            f"{cursor_img[1]:.2%}) residual={v_resid:.2%}"
                             f" ≤ {click_tol_pct:.1%} — clicking"
                         )
                     # else: wiggle couldn't localise (busy bg) —
