@@ -1268,54 +1268,57 @@ class VisualServoHomer:
         await self._send_hid(hid_x, hid_y)
         await asyncio.sleep(0.35)
 
-        # 4. Servo tail. Capture the post-burst frame, detect cursor
-        #    via frame-diff against pre-burst, run a short servo loop
-        #    to close any residual gap. ~3-5 small steps.
-        cursor_img = (x_pct, y_pct)  # open-loop assumption
-        # The full closed-loop is expensive; instead we just do a few
-        # targeted micro-corrections analogous to the post-confirm
-        # path in the ROI servo.
+        # 4. ONE-SHOT correction. The bulk burst lands the cursor
+        #    near the target (typically 2-4 %% off due to pointer-
+        #    accel's burst-length sub-linearity). Locate the cursor
+        #    ONCE via oscillation, compute the residual, send one
+        #    corrective burst at the calibrated ratio, commit.
+        #
+        #    Earlier iteration used a multi-step tail with wiggle-
+        #    based verification between each correction; the +/- 15
+        #    HID wiggle pair doesn't perfectly cancel (pointer-accel
+        #    is slightly asymmetric at small magnitudes) and across
+        #    multiple iterations the drift accumulated AWAY from the
+        #    target. One localize + one correction avoids the
+        #    accumulation while still closing the bulk's residual.
         target_aim = (x_pct, y_pct)
-        TAIL_MAX_STEPS = 6
-        TAIL_TOL = 0.010
-        for tail in range(TAIL_MAX_STEPS):
-            verified = await self._verify_cursor_via_wiggle(cursor_img)
-            if verified is None:
-                # Couldn't localise. Trust open-loop and commit.
-                break
-            cursor_img = verified
-            v_resid = math.hypot(
-                target_aim[0] - verified[0],
-                target_aim[1] - verified[1],
+        cursor_img = (x_pct, y_pct)  # open-loop assumption
+        try:
+            measured = await self._find_cursor_via_oscillation(
+                run_dir, label="openloop_post_bulk",
             )
-            if v_resid <= TAIL_TOL:
-                print(
-                    f"  Tail step {tail+1}: cursor=({verified[0]:.2%},"
-                    f"{verified[1]:.2%}) residual={v_resid:.2%} ≤ "
-                    f"{TAIL_TOL:.1%} — done"
-                )
-                break
-            # Compute corrective HID using the OPENLOOP-calibrated
-            # ratio (the burst-rate ratio). Small-HID corrections
-            # fall into the pointer-accel dead zone where each HID
-            # produces ~10× less movement than the calibrated ratio
-            # predicts — so we deliberately keep corrections in the
-            # MEDIUM-magnitude regime where the calibration applies.
-            # Clamped to ±400 so we don't overshoot dramatically.
+        except Exception:
+            measured = None
+        if measured is not None:
+            cursor_img = measured
             dx_pct = target_aim[0] - cursor_img[0]
             dy_pct = target_aim[1] - cursor_img[1]
-            hid_dx = int(dx_pct / rx)
-            hid_dy = int(dy_pct / ry)
-            hid_dx = max(-400, min(400, hid_dx))
-            hid_dy = max(-400, min(400, hid_dy))
-            if hid_dx == 0 and hid_dy == 0:
-                break
-            await self._send_hid(hid_dx, hid_dy)
-            await asyncio.sleep(0.15)
+            residual = math.hypot(dx_pct, dy_pct)
+            if residual > 0.010:
+                hid_dx = int(dx_pct / rx)
+                hid_dy = int(dy_pct / ry)
+                hid_dx = max(-400, min(400, hid_dx))
+                hid_dy = max(-400, min(400, hid_dy))
+                if hid_dx != 0 or hid_dy != 0:
+                    await self._send_hid(hid_dx, hid_dy)
+                    await asyncio.sleep(0.20)
+                    print(
+                        f"  Post-bulk correction: cursor=({cursor_img[0]:.2%},"
+                        f"{cursor_img[1]:.2%}) residual={residual:.2%} → "
+                        f"hid=({hid_dx:+d},{hid_dy:+d})  (no re-verify; "
+                        f"trusts calibrated ratio)"
+                    )
+                    cursor_img = target_aim  # assumed post-correction
+            else:
+                print(
+                    f"  Post-bulk: cursor=({cursor_img[0]:.2%},"
+                    f"{cursor_img[1]:.2%}) residual={residual:.2%} — "
+                    f"within 1 %%, clicking directly"
+                )
+        else:
             print(
-                f"  Tail step {tail+1}: cursor=({verified[0]:.2%},"
-                f"{verified[1]:.2%}) residual={v_resid:.2%} → "
-                f"hid=({hid_dx:+d},{hid_dy:+d})"
+                "  Post-bulk localize failed — committing at "
+                "open-loop assumption"
             )
 
         # 5. Click.
