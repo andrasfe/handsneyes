@@ -112,6 +112,8 @@ def find_snap_target(
     frame_bgr: np.ndarray,
     aim_xy_pct: tuple[float, float],
     *,
+    cursor_xy_pct: Optional[tuple[float, float]] = None,
+    cursor_mask_radius_pct: float = 0.015,
     snap_radius_pct: float = 0.03,
     roi_size_px: int = _TARGET_RES,
     similarity_threshold: float = 0.55,
@@ -169,6 +171,36 @@ def find_snap_target(
             cv2.BORDER_REPLICATE,
         )
 
+    # Mask out the cursor sprite if its position was provided. DINOv2
+    # clusters by visual coherence — and the cursor itself is the
+    # most visually-coherent thing inside the ROI, so without
+    # masking it dominates the seed patch's connected component and
+    # the snap centroid lands on the cursor's geometric centre
+    # (down-right of the hotspot for an up-left-pointing arrow,
+    # producing a systematic down-right snap bias on every click).
+    # Painting a neutral-grey disk over the cursor before patch-
+    # encoding kills its features so the snap reflects the UI under
+    # the click rather than the cursor sprite obscuring it.
+    if cursor_xy_pct is not None:
+        cursor_in_roi_x = int(cursor_xy_pct[0] * w) - x0
+        cursor_in_roi_y = int(cursor_xy_pct[1] * h) - y0
+        if (
+            0 <= cursor_in_roi_x < roi_size_px
+            and 0 <= cursor_in_roi_y < roi_size_px
+        ):
+            mask_r = max(8, int(cursor_mask_radius_pct * w))
+            cv2.circle(
+                roi_bgr,
+                (cursor_in_roi_x, cursor_in_roi_y),
+                mask_r,
+                # Neutral mid-grey — gives the patches under the
+                # cursor low contrast against typical UI, so they
+                # tend to cluster with background rather than with
+                # any specific UI element.
+                (127, 127, 127),
+                thickness=-1,
+            )
+
     # DINOv2 expects RGB.
     roi_rgb = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2RGB)
 
@@ -215,6 +247,17 @@ def find_snap_target(
 
     rows, cols = np.where(labels == aim_label)
     if len(rows) == 0:
+        return None
+
+    # Background rejection. If the component covers more than half
+    # the ROI it's almost certainly the page background (white
+    # space, panel body, modal backdrop), NOT a discrete clickable
+    # UI element. Its centroid is wherever the background extends
+    # — which produces a systematic snap bias toward the page's
+    # centre of mass rather than any actual click target. Reject
+    # those and let the homer commit at its geometric aim.
+    total_patches = grid * grid
+    if len(rows) > 0.45 * total_patches:
         return None
 
     # Centroid of the component in patch-grid coords, then back to

@@ -1864,6 +1864,7 @@ class VisualServoHomer:
                                 frame = await self._capture_color()
                                 snap = find_snap_target(
                                     frame, target_aim,
+                                    cursor_xy_pct=cursor_img,
                                     snap_radius_pct=0.03,
                                 )
                                 if snap is not None:
