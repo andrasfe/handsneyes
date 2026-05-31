@@ -881,6 +881,30 @@ class VisualServoHomer:
         dragging: bool = False,
         click_count: int = 1,
     ) -> ClickOutcome:
+        # Opt-in open-loop fast path. The chunked HID send produces a
+        # ~linear HID→pixel ratio at steady-state velocity, and the
+        # slam-to-corner pins the cursor HOTSPOT at (0, 0) regardless
+        # of cursor shape. So move the cursor by exactly (x_pct, y_pct)
+        # in image-percent and the hotspot lands at the user's target.
+        # No servo loop, no hotspot offset, no cursor-shape concern.
+        if (
+            os.environ.get("HANDSNEYES_OPENLOOP") == "1"
+            and prev_cursor_pct is None
+            and not dragging
+            # Requires a learned ratio — the default seed
+            # (0.833‰) is ~5× too high for typical screen-share
+            # remote targets and an open-loop send at that
+            # ratio under-shoots dramatically. Fall back to the
+            # servo loop for the first click; it'll learn the
+            # ratio AND cache it, and the next click goes
+            # open-loop with calibrated data.
+            and abs(self._pct_per_hid_x - DEFAULT_PCT_PER_HID) > 1e-6
+            and abs(self._pct_per_hid_y - DEFAULT_PCT_PER_HID) > 1e-6
+        ):
+            return await self._home_to_pixel_openloop(
+                x_pct, y_pct, button=button, click=click,
+                click_count=click_count,
+            )
         """Home the cursor to a pre-located pixel on the webcam frame.
 
         Skips the OCR/VLM target-location step (operator already told
@@ -1112,6 +1136,104 @@ class VisualServoHomer:
             axis_aligned=(prev_cursor_pct is not None),
             dragging=dragging,
             click_count=click_count,
+        )
+
+    async def _home_to_pixel_openloop(
+        self,
+        x_pct: float, y_pct: float,
+        *, button: str, click: bool, click_count: int,
+    ) -> ClickOutcome:
+        """Open-loop click. Slam → single chunked HID move → click.
+
+        Premise: the chunked HID send (MOVE_STEP_SIZE=3 with 3 ms
+        between chunks) drives the cursor at a steady-state velocity
+        where macOS pointer-accel produces a linear HID→pixel ratio.
+        We track that ratio in ``self._pct_per_hid_*`` (seeded from
+        the cc-level cache, refined over subsequent clicks).
+
+        Slam clamps the cursor's HOTSPOT at host (0, 0) — that's
+        true for ANY cursor shape (arrow, hand, I-beam, crosshair),
+        which is the property the legacy servo path exploited for
+        hotspot calibration. Here we exploit it more directly: to
+        get the hotspot to land at (x_pct, y_pct), just move the
+        cursor by exactly (x_pct, y_pct) in image-percent terms.
+        No cursor-shape detection, no hotspot offset, no servo loop.
+
+        Trade-off: open-loop means no feedback. If the ratio drifts
+        or HID reports are dropped, the click lands wrong with no
+        recovery. For most hosts the chunked-rate ratio is stable
+        across sessions so this is acceptable; the visual servo
+        path stays available for hosts where it isn't.
+        """
+        from datetime import datetime
+        session_out = getattr(self._session, "output_dir", None)
+        ts = datetime.now().strftime("%H%M%S_openloop")
+        if session_out is not None:
+            run_dir = session_out / "homer" / ts
+            run_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            from pathlib import Path
+            run_dir = Path("/tmp")
+
+        print(
+            f"  Open-loop click → ({x_pct:.2%}, {y_pct:.2%}) "
+            f"ratio=({self._pct_per_hid_x*1000:.3f},"
+            f"{self._pct_per_hid_y*1000:.3f})‰"
+        )
+
+        # 1. Slam — hotspot clamped at (0, 0).
+        await self._slam_to_corner()
+
+        # 2. Compute HID delta from the chunked-rate ratio.
+        #    hid_x * ratio_x = x_pct  →  hid_x = x_pct / ratio_x
+        rx = max(RATIO_MIN, min(RATIO_MAX, self._pct_per_hid_x))
+        ry = max(RATIO_MIN, min(RATIO_MAX, self._pct_per_hid_y))
+        hid_x = int(x_pct / rx)
+        hid_y = int(y_pct / ry)
+        print(f"  Sending hid=({hid_x:+d},{hid_y:+d}) (single chunked burst)")
+
+        # 3. Single chunked send via the existing _send_hid path —
+        #    same chunking the visual servo used; same ratio applies.
+        await self._send_hid(hid_x, hid_y)
+        # Let the cursor settle on the host so the click registers at
+        # the final position (some apps focus-track during mouse
+        # movement and a click during transit lands on the wrong
+        # element).
+        await asyncio.sleep(0.3)
+
+        # 4. Click.
+        if click:
+            try:
+                await self._session._executor._mouse.click(
+                    button, count=click_count,
+                )
+            except TypeError:
+                # Legacy backend without count= support.
+                await self._session._executor._mouse.click(button)
+                for _ in range(1, click_count):
+                    await asyncio.sleep(0.08)
+                    try:
+                        await self._session._executor._mouse.click(button)
+                    except Exception:
+                        break
+
+        # 5. Capture proof.
+        proof: str | None = None
+        try:
+            await asyncio.sleep(0.35)
+            proof = await self._capture_proof(run_dir, 0)
+        except Exception:
+            proof = None
+
+        return ClickOutcome(
+            clicked=True, steps=1,
+            reason="openloop",
+            proof_path=proof, history=[],
+            # We're open-loop so we don't *measure* the final cursor
+            # position — but we DROVE the cursor's hotspot to the
+            # user's target, and the marker overlay uses this
+            # value to draw the green "homer-reported" dot.
+            final_cursor_pct=(x_pct, y_pct),
         )
 
     async def drag_to_pixels(
