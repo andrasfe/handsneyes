@@ -1257,7 +1257,20 @@ class VisualServoHomer:
         #    we start the real send from a known (0, 0) hotspot.
         await self._slam_to_corner()
 
-        # 3. Fire the calibrated bulk burst.
+        # 3. Snapshot the PRE-bulk frame (cursor at corner). We'll
+        #    diff this against the POST-bulk frame to localize the
+        #    cursor after the move — much more reliable than
+        #    oscillation re-localize on this transport (oscillation
+        #    needs ~5-12 px of cursor displacement to clear the
+        #    screen-share encoder noise floor, and small-amplitude
+        #    jiggles at the post-bulk position sometimes don't
+        #    register).
+        try:
+            pre_bulk = await self._capture_gray()
+        except Exception:
+            pre_bulk = None
+
+        # 4. Fire the calibrated bulk burst.
         hid_x = int(x_pct / rx)
         hid_y = int(y_pct / ry)
         print(
@@ -1268,27 +1281,36 @@ class VisualServoHomer:
         await self._send_hid(hid_x, hid_y)
         await asyncio.sleep(0.35)
 
-        # 4. ONE-SHOT correction. The bulk burst lands the cursor
-        #    near the target (typically 2-4 %% off due to pointer-
-        #    accel's burst-length sub-linearity). Locate the cursor
-        #    ONCE via oscillation, compute the residual, send one
-        #    corrective burst at the calibrated ratio, commit.
-        #
-        #    Earlier iteration used a multi-step tail with wiggle-
-        #    based verification between each correction; the +/- 15
-        #    HID wiggle pair doesn't perfectly cancel (pointer-accel
-        #    is slightly asymmetric at small magnitudes) and across
-        #    multiple iterations the drift accumulated AWAY from the
-        #    target. One localize + one correction avoids the
-        #    accumulation while still closing the bulk's residual.
+        # 5. Localize cursor via frame-diff. Pre-bulk had cursor at
+        #    corner; post-bulk has it somewhere on screen. The diff
+        #    has TWO blobs (cursor at corner where it WAS, cursor
+        #    near target where it IS NOW). The disambiguator picks
+        #    the one nearest the predicted post-bulk position
+        #    (= the user's target). Falls back to oscillation if
+        #    diff localization fails.
         target_aim = (x_pct, y_pct)
         cursor_img = (x_pct, y_pct)  # open-loop assumption
-        try:
-            measured = await self._find_cursor_via_oscillation(
-                run_dir, label="openloop_post_bulk",
-            )
-        except Exception:
-            measured = None
+        measured: tuple[float, float] | None = None
+        if pre_bulk is not None:
+            try:
+                post_bulk = await self._capture_gray()
+                hit = self._detect_cursor_in_roi(
+                    pre_bulk, post_bulk,
+                    (0.0, 0.0, 1.0, 1.0),
+                    near_pct=target_aim,
+                )
+                if hit is not None:
+                    measured = hit[0]
+            except Exception:
+                measured = None
+        if measured is None:
+            # Diff didn't isolate the cursor — try oscillation.
+            try:
+                measured = await self._find_cursor_via_oscillation(
+                    run_dir, label="openloop_post_bulk",
+                )
+            except Exception:
+                measured = None
         if measured is not None:
             cursor_img = measured
             dx_pct = target_aim[0] - cursor_img[0]
