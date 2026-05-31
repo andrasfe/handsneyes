@@ -897,17 +897,28 @@ class VisualServoHomer:
         # of cursor shape. So move the cursor by exactly (x_pct, y_pct)
         # in image-percent and the hotspot lands at the user's target.
         # No servo loop, no hotspot offset, no cursor-shape concern.
+        #
+        # Also routes no-slam follow-up clicks through openloop: when
+        # prev_cursor_pct is set, we use it as the PRE-bulk cursor
+        # position instead of slamming to corner. The diff-localize
+        # still produces two clean blobs (cursor-at-prev vs cursor-at-
+        # target) and the disambiguator picks the one nearest the
+        # operator's target. This rescues follow-up clicks from the
+        # closed-loop ROI servo's failure modes on dynamic UI (LinkedIn
+        # message threads, animated dashboards) where ROI detection
+        # mis-tracks the cursor and the recovery cruise bursts fling
+        # it across the screen.
         if (
             os.environ.get("HANDSNEYES_OPENLOOP") == "1"
-            and prev_cursor_pct is None
             and not dragging
         ):
             # Open-loop hybrid: self-calibrates the ratio against
             # the actual openloop send pattern on first invocation,
-            # then bulk-sends and runs a short servo tail.
+            # then bulk-sends + iterative correction.
             return await self._home_to_pixel_openloop(
                 x_pct, y_pct, button=button, click=click,
                 click_count=click_count,
+                prev_cursor_pct=prev_cursor_pct,
             )
         """Home the cursor to a pre-located pixel on the webcam frame.
 
@@ -1200,6 +1211,7 @@ class VisualServoHomer:
         self,
         x_pct: float, y_pct: float,
         *, button: str, click: bool, click_count: int,
+        prev_cursor_pct: tuple[float, float] | None = None,
     ) -> ClickOutcome:
         """Hybrid open-loop + short servo tail.
 
@@ -1252,29 +1264,45 @@ class VisualServoHomer:
 
         rx = self._pct_per_hid_openloop_x
         ry = self._pct_per_hid_openloop_y
-        # 2. Slam — calibration already slammed but consumed the
-        #    cursor position via the calibration burst; re-slam so
-        #    we start the real send from a known (0, 0) hotspot.
-        await self._slam_to_corner()
+        # 2. Position the cursor at a known starting point.
+        #    - slam path: cursor hotspot to (0, 0); bulk moves the
+        #      cursor by (x_pct, y_pct) so hotspot lands at target.
+        #    - no-slam path: trust prev_cursor_pct as the starting
+        #      cursor location; bulk moves by delta = target - prev.
+        #      Slam is skipped so any open transient UI (menu, modal,
+        #      dropdown) stays open across the follow-up click.
+        if prev_cursor_pct is None:
+            await self._slam_to_corner()
+            start_hotspot = (0.0, 0.0)
+        else:
+            start_hotspot = (
+                float(prev_cursor_pct[0]),
+                float(prev_cursor_pct[1]),
+            )
+            print(
+                f"  Open-loop no-slam: starting from cached cursor "
+                f"({start_hotspot[0]:.2%}, {start_hotspot[1]:.2%})"
+            )
 
-        # 3. Snapshot the PRE-bulk frame (cursor at corner). We'll
-        #    diff this against the POST-bulk frame to localize the
-        #    cursor after the move — much more reliable than
-        #    oscillation re-localize on this transport (oscillation
-        #    needs ~5-12 px of cursor displacement to clear the
-        #    screen-share encoder noise floor, and small-amplitude
-        #    jiggles at the post-bulk position sometimes don't
-        #    register).
+        # 3. Snapshot the PRE-bulk frame (cursor at start_hotspot).
+        #    The diff against POST-bulk has TWO cursor blobs (the
+        #    start position and the post-bulk position). The
+        #    near_pct=target_aim disambiguator picks the post-bulk
+        #    one — works regardless of where the start was.
         try:
             pre_bulk = await self._capture_gray()
         except Exception:
             pre_bulk = None
 
-        # 4. Fire the calibrated bulk burst.
-        hid_x = int(x_pct / rx)
-        hid_y = int(y_pct / ry)
+        # 4. Fire the calibrated bulk burst — by delta from the
+        #    current cursor position to the target.
+        delta_x = x_pct - start_hotspot[0]
+        delta_y = y_pct - start_hotspot[1]
+        hid_x = int(delta_x / rx)
+        hid_y = int(delta_y / ry)
         print(
             f"  Open-loop bulk → ({x_pct:.2%}, {y_pct:.2%}) "
+            f"from ({start_hotspot[0]:.2%},{start_hotspot[1]:.2%}) "
             f"ratio=({rx*1000:.3f},{ry*1000:.3f})‰ "
             f"hid=({hid_x:+d},{hid_y:+d})"
         )
