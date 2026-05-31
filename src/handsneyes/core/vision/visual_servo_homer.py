@@ -29,6 +29,7 @@ Reuses scene-map + ShowUI grounding from ``ClosedLoopHomer`` for the
 from __future__ import annotations
 
 import asyncio
+import os
 import json
 import logging
 import math
@@ -1844,6 +1845,55 @@ class VisualServoHomer:
                                 f"{mhid_dy:+d}) → cursor=({re_verified[0]:.2%},"
                                 f"{re_verified[1]:.2%}) residual={new_resid:.2%}"
                             )
+
+                        # ─── DINOv2 click-target snap ──────────
+                        # Opt-in (HANDSNEYES_DINO_SNAP=1). Looks at
+                        # a 224×224 ROI around the aim, finds the
+                        # coherent UI element under the click, and
+                        # snaps the cursor to its centroid if it's
+                        # within the snap radius. Adds ~150 ms of
+                        # inference but can rescue clicks that
+                        # geometrically landed a few px off a button.
+                        if (
+                            os.environ.get("HANDSNEYES_DINO_SNAP") == "1"
+                        ):
+                            try:
+                                from handsneyes.core.vision.dino_snap import (
+                                    find_snap_target,
+                                )
+                                frame = await self._capture_color()
+                                snap = find_snap_target(
+                                    frame, target_aim,
+                                    snap_radius_pct=0.03,
+                                )
+                                if snap is not None:
+                                    # Drive cursor to the snap point
+                                    # via one final micro-correction.
+                                    sdx = snap[0] - cursor_img[0]
+                                    sdy = snap[1] - cursor_img[1]
+                                    if abs(sdx) > 0.001 or abs(sdy) > 0.001:
+                                        shx, shy = self._hid_for_residual(sdx, sdy)
+                                        shx = max(-20, min(20, shx))
+                                        shy = max(-20, min(20, shy))
+                                        if shx != 0 or shy != 0:
+                                            await self._send_hid(shx, shy)
+                                            await asyncio.sleep(0.10)
+                                        cursor_img = snap
+                                        print(
+                                            f"  [{step:02d}|D] dino snap: "
+                                            f"target_aim=({target_aim[0]:.2%},"
+                                            f"{target_aim[1]:.2%}) → "
+                                            f"snap=({snap[0]:.2%},{snap[1]:.2%}) "
+                                            f"Δ=({sdx*100:+.2f}%,{sdy*100:+.2f}%) "
+                                            f"hid=({shx:+d},{shy:+d})"
+                                        )
+                                else:
+                                    print(
+                                        f"  [{step:02d}|D] dino: no snap "
+                                        f"target found near aim"
+                                    )
+                            except Exception as e:
+                                print(f"  [{step:02d}|D] dino skipped: {e}")
 
                         print(
                             f"  [{step:02d}|V] verified: cursor=({cursor_img[0]:.2%},"

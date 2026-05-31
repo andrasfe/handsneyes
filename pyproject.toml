@@ -44,6 +44,17 @@ rpi = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.27.0",
 ]
+# DINOv2-driven click-target snapping. Opt-in via HANDSNEYES_DINO_SNAP=1.
+# After the homer's micro-correction loop drives the cursor to within
+# a few px of the aim, DINOv2-small classifies the local visual
+# region and snaps the click to the nearest coherent UI element
+# (button, link, field). On Apple Silicon with MPS, inference is
+# ~8 ms after a one-time ~6 s model load.
+dino-snap = [
+    "torch>=2.0",
+    "torchvision>=0.15",
+    "transformers>=4.30",
+]
 
 [project.scripts]
 handsneyes    = "handsneyes.cli:main"
