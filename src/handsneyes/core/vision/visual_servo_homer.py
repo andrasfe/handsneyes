@@ -1414,6 +1414,112 @@ class VisualServoHomer:
                     f"residual unmeasured"
                 )
 
+        # 5b. DINOv2 click-target snap (opt-in, HANDSNEYES_DINO_SNAP=1).
+        #
+        #     Closes the gap between where the homer landed and the
+        #     actual button the operator was trying to click. DINO's
+        #     ROI is centred on the OPERATOR's click point
+        #     (target_aim), not the cursor's current position, so it
+        #     identifies the button the operator pointed at regardless
+        #     of how far away the cursor landed. This is the rescue
+        #     path when openloop's diff-localize was wrong about where
+        #     the cursor went (the openloop sidecar reported
+        #     residual=9% even though it claimed "openloop_hybrid" —
+        #     the localize picked a non-cursor blob, the iterative
+        #     correction trusted that wrong belief, and the click
+        #     landed nowhere near the button).
+        #
+        #     Iterative: DINO finds the snap target ONCE (its answer
+        #     is independent of cursor position), then we drive the
+        #     cursor to it with up to MAX_DINO_ITERS correction bursts,
+        #     re-localizing the cursor between each via diff against
+        #     pre_bulk. Each burst is UNCLAMPED — DINO gave us a
+        #     visually-confirmed target, no need to rate-limit.
+        #
+        #     Snap radius is configurable via HANDSNEYES_DINO_SNAP_PCT
+        #     (default 0.05 = 5 %% ≈ 100 px on 1920w ≈ a small button).
+        if os.environ.get("HANDSNEYES_DINO_SNAP") == "1":
+            MAX_DINO_ITERS = 3
+            DINO_TOL = 0.004  # 0.4 %% — match the openloop tol
+            try:
+                from handsneyes.core.vision.dino_snap import (
+                    find_snap_target,
+                )
+                snap_radius_pct = float(
+                    os.environ.get("HANDSNEYES_DINO_SNAP_PCT", "0.05")
+                )
+                frame_color = await self._capture_color()
+                snap = find_snap_target(
+                    frame_color, target_aim,
+                    cursor_xy_pct=cursor_img,
+                    snap_radius_pct=snap_radius_pct,
+                )
+                if snap is not None:
+                    print(
+                        f"  Dino snap: aim=({target_aim[0]:.2%},"
+                        f"{target_aim[1]:.2%}) → "
+                        f"snap=({snap[0]:.2%},{snap[1]:.2%})"
+                    )
+                    for d_it in range(MAX_DINO_ITERS):
+                        sdx_pct = snap[0] - cursor_img[0]
+                        sdy_pct = snap[1] - cursor_img[1]
+                        sres = math.hypot(sdx_pct, sdy_pct)
+                        if sres <= DINO_TOL:
+                            print(
+                                f"  Dino iter {d_it}: cursor=({cursor_img[0]:.2%},"
+                                f"{cursor_img[1]:.2%}) residual={sres:.2%} "
+                                f"— on snap, clicking"
+                            )
+                            break
+                        shx = int(sdx_pct / rx)
+                        shy = int(sdy_pct / ry)
+                        print(
+                            f"  Dino iter {d_it}: cursor=({cursor_img[0]:.2%},"
+                            f"{cursor_img[1]:.2%}) residual={sres:.2%} → "
+                            f"hid=({shx:+d},{shy:+d})"
+                        )
+                        if shx == 0 and shy == 0:
+                            break
+                        await self._send_hid(shx, shy)
+                        await asyncio.sleep(0.22)
+                        # Re-localize via diff against pre_bulk (the
+                        # post-slam corner frame). The pre/post diff
+                        # still has two clean blobs (corner + current
+                        # cursor) and the near_pct=snap disambiguator
+                        # picks the post-burst one.
+                        if pre_bulk is not None:
+                            try:
+                                post = await self._capture_gray()
+                                hit = self._detect_cursor_in_roi(
+                                    pre_bulk, post,
+                                    (0.0, 0.0, 1.0, 1.0),
+                                    near_pct=snap,
+                                )
+                                if hit is not None:
+                                    measured_c = hit[0]
+                                    cursor_img = (
+                                        measured_c[0] - hot_x,
+                                        measured_c[1] - hot_y,
+                                    )
+                                else:
+                                    # Localize failed — assume the
+                                    # burst landed where intended.
+                                    cursor_img = snap
+                                    break
+                            except Exception:
+                                cursor_img = snap
+                                break
+                        else:
+                            cursor_img = snap
+                            break
+                else:
+                    print(
+                        f"  Dino: no snap target near aim "
+                        f"(radius={snap_radius_pct:.1%})"
+                    )
+            except Exception as e:
+                print(f"  Dino skipped: {e}")
+
         # 5. Click.
         if click:
             try:
