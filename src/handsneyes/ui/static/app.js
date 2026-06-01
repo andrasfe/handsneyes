@@ -1247,6 +1247,156 @@ if ($schedModalClose) $schedModalClose.addEventListener("click", closeSchedModal
 if ($schedModalCancel) $schedModalCancel.addEventListener("click", closeSchedModal);
 if ($schedModalSubmit) $schedModalSubmit.addEventListener("click", submitSchedModal);
 
+// ── Watch & Click modal (snap-and-click scheduler) ────────────────
+const $btnWatchClick = document.getElementById("btn-watch-click");
+const $watchModal = document.getElementById("watch-modal");
+const $watchModalClose = document.getElementById("watch-modal-close");
+const $watchModalCancel = document.getElementById("watch-modal-cancel");
+const $watchModalSubmit = document.getElementById("watch-modal-submit");
+const $watchInterval = document.getElementById("watch-interval");
+const $watchRadius = document.getElementById("watch-radius");
+const $watchFireNow = document.getElementById("watch-fire-now");
+const $watchAimCoords = document.getElementById("watch-aim-coords");
+const $watchJobsList = document.getElementById("watch-jobs-list");
+
+// Tracks the most recent click coordinates the user made on the frame.
+// Populated by the existing frame-click handler that fires the
+// click_at request. Re-used as the aim for the watcher.
+let _lastFrameClickPct = null;
+
+function recordFrameClick(xPct, yPct) {
+  _lastFrameClickPct = { x: xPct, y: yPct };
+  if ($watchAimCoords && !$watchModal.classList.contains("hidden")) {
+    $watchAimCoords.textContent =
+      `(${(xPct * 100).toFixed(1)}%, ${(yPct * 100).toFixed(1)}%)`;
+  }
+}
+
+async function refreshWatchList() {
+  if (!$watchJobsList) return;
+  try {
+    const r = await fetch("/api/scheduler/list");
+    if (!r.ok) return;
+    const j = await r.json();
+    // Filter to snap_and_click only; the intent scheduler has its
+    // own list inside the Execute… modal.
+    const jobs = (j.jobs || []).filter(x => x.kind === "snap_and_click");
+    if (jobs.length === 0) {
+      $watchJobsList.innerHTML =
+        '<li class="sched-jobs-empty">no active watchers</li>';
+      return;
+    }
+    $watchJobsList.innerHTML = "";
+    for (const job of jobs) {
+      const li = document.createElement("li");
+      const opts = job.options || {};
+      const xp = (opts.x_pct || 0) * 100;
+      const yp = (opts.y_pct || 0) * 100;
+      const intervalS = (job.interval_minutes || 0) * 60;
+      const meta = document.createElement("div");
+      meta.innerHTML =
+        `<div><b>watch (${xp.toFixed(1)}%, ${yp.toFixed(1)}%)</b></div>` +
+        `<div class="sched-job-meta">every ${intervalS.toFixed(1)}s · ` +
+        `checked ${job.fire_count || 0}× · clicked ${job.click_count || 0}×` +
+        (job.last_error ? ` · last error: ${escapeHtml(job.last_error)}` : "") +
+        `</div>`;
+      const btn = document.createElement("button");
+      btn.className = "sched-job-cancel";
+      btn.textContent = "Stop";
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          await fetch("/api/scheduler/cancel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: job.id }),
+          });
+        } catch (e) { /* ignore */ }
+        refreshWatchList();
+      });
+      li.appendChild(meta);
+      li.appendChild(btn);
+      $watchJobsList.appendChild(li);
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function openWatchModal() {
+  if (!$watchModal) return;
+  if (_lastFrameClickPct && $watchAimCoords) {
+    $watchAimCoords.textContent =
+      `(${(_lastFrameClickPct.x * 100).toFixed(1)}%, ` +
+      `${(_lastFrameClickPct.y * 100).toFixed(1)}%)`;
+  } else if ($watchAimCoords) {
+    $watchAimCoords.textContent = "(none — click on the frame first)";
+  }
+  $watchModal.classList.remove("hidden");
+  $watchModal.setAttribute("aria-hidden", "false");
+  refreshWatchList();
+}
+
+function closeWatchModal() {
+  if (!$watchModal) return;
+  $watchModal.classList.add("hidden");
+  $watchModal.setAttribute("aria-hidden", "true");
+}
+
+async function submitWatchModal() {
+  if (!_lastFrameClickPct) {
+    appendSystemLog(
+      "ERROR",
+      "Watch & Click: no aim yet — click on the frame first to set it.",
+    );
+    return;
+  }
+  const interval_seconds = parseFloat($watchInterval.value);
+  const snap_radius_pct = parseFloat($watchRadius.value);
+  if (!Number.isFinite(interval_seconds) || interval_seconds <= 0) {
+    $watchInterval.focus();
+    return;
+  }
+  if (!Number.isFinite(snap_radius_pct) || snap_radius_pct <= 0) {
+    $watchRadius.focus();
+    return;
+  }
+  $watchModalSubmit.disabled = true;
+  try {
+    const r = await fetch("/api/scheduler/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind: "snap_and_click",
+        x_pct: _lastFrameClickPct.x,
+        y_pct: _lastFrameClickPct.y,
+        snap_radius_pct,
+        interval_seconds,
+        fire_immediately: $watchFireNow.checked,
+      }),
+    });
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      window.alert(`watcher create failed: ${r.status} ${t}`);
+      return;
+    }
+    appendSystemLog(
+      "INFO",
+      `watching (${(_lastFrameClickPct.x * 100).toFixed(1)}%, ` +
+      `${(_lastFrameClickPct.y * 100).toFixed(1)}%) every ${interval_seconds}s ` +
+      `(snap radius ${(snap_radius_pct * 100).toFixed(1)}%)`,
+    );
+    await refreshWatchList();
+  } catch (e) {
+    window.alert(`watcher error: ${e}`);
+  } finally {
+    $watchModalSubmit.disabled = false;
+  }
+}
+
+if ($btnWatchClick) $btnWatchClick.addEventListener("click", openWatchModal);
+if ($watchModalClose) $watchModalClose.addEventListener("click", closeWatchModal);
+if ($watchModalCancel) $watchModalCancel.addEventListener("click", closeWatchModal);
+if ($watchModalSubmit) $watchModalSubmit.addEventListener("click", submitWatchModal);
+
 // ── homer retrain (online training) ────────────────────────────
 const $btnRetrain = document.getElementById("btn-retrain");
 const $btnRollback = document.getElementById("btn-rollback");
@@ -1521,6 +1671,7 @@ async function _fireHomingClick(x_pct, y_pct, clientX, clientY) {
   if ($frame.classList.contains("empty")) return;
   if (_mouseBusy) return;
   showClickMarker(clientX, clientY);
+  recordFrameClick(x_pct, y_pct);
   appendSystemLog(
     "INFO",
     `mouse click_at (${x_pct.toFixed(3)}, ${y_pct.toFixed(3)})`,

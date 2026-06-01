@@ -103,6 +103,8 @@
                 title="Unlock the target screen using the named vault entry">Unlock</button>
         <button id="btn-type-secret" type="button" class="quick"
                 title="Type a secret (vault entry or direct value) at the host's current focused field. Position the cursor first by clicking into the desired input.">Type Secret</button>
+        <button id="btn-watch-click" type="button" class="quick"
+                title="Watch the location of your most recent click on the frame. On every interval, capture a fresh frame; if a snap-able UI element is within the snap radius, click it. No-op when no target is present, so it's safe to leave running.">Watch &amp; Click…</button>
         <button id="btn-exec-script" type="button" class="quick"
                 title="Open a textarea, paste a shell script, run it on the target">Execute Script…</button>
         <button id="btn-retrain" type="button" class="quick"
@@ -260,6 +262,44 @@
       <div class="modal-footer">
         <button id="unlock-modal-cancel" type="button">Cancel</button>
         <button id="unlock-modal-submit" type="button" class="primary">Unlock</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Watch & Click modal: schedule a recurring snap-and-click at the
+       location of the most recent frame click. -->
+  <div id="watch-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-card">
+      <div class="modal-header">
+        <span>Watch &amp; Click</span>
+        <button id="watch-modal-close" type="button" title="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <div id="watch-aim-info" class="modal-hint">
+          aim: <span id="watch-aim-coords">(none — click on the frame first)</span>
+        </div>
+        <label class="modal-label">Check every
+          <input id="watch-interval" type="number" min="0.5" step="0.5" value="5" style="width:6em;" />
+          seconds
+        </label>
+        <label class="modal-label">Snap radius
+          <input id="watch-radius" type="number" min="0.005" max="0.30" step="0.005" value="0.05" style="width:6em;" />
+          (image-percent; default 5% ≈ 100px on 1920w)
+        </label>
+        <label class="opt">
+          <input type="checkbox" id="watch-fire-now" checked>
+          Fire immediately on create (don't wait one interval before the first check)
+        </label>
+        <div class="sched-jobs-section">
+          <div class="label">Active watchers</div>
+          <ul id="watch-jobs-list" class="sched-jobs">
+            <li class="sched-jobs-empty">no active watchers</li>
+          </ul>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="watch-modal-cancel" type="button">Cancel</button>
+        <button id="watch-modal-submit" type="button" class="primary">Start Watching</button>
       </div>
     </div>
   </div>

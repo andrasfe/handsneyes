@@ -71,13 +71,25 @@ class RunRequest(BaseModel):
 
 
 class ScheduleCreateRequest(BaseModel):
-    """Recurring controller intent. Each tick fires the same RunRequest
-    shape; a tick where the runner is busy is silently skipped (a tune
-    or earlier scheduled job wins). Skipped ticks don't shift the cadence
-    — the next fire is still N minutes after the previous SCHEDULED tick,
-    not after the skipped one."""
-    intent: str = Field(min_length=1)
-    interval_minutes: float = Field(gt=0.0, le=24 * 60.0)
+    """Recurring scheduled job. Two ``kind``s are supported:
+
+      - ``intent`` (default) — fires the controller agent with the
+        same RunRequest shape as the chat-form Send button. Used for
+        "every 5 min, check the build status" workflows.
+      - ``snap_and_click`` — fires /api/snap-and-click with a saved
+        aim. Used for "click this button whenever it reappears"
+        workflows where a controller agent run would be overkill.
+
+    A tick where the runner is busy is silently skipped (a tune or
+    earlier job wins). Skipped ticks don't shift the cadence — the
+    next fire is still N units after the previous SCHEDULED tick,
+    not after the skipped one.
+    """
+    kind: str = Field(default="intent", pattern="^(intent|snap_and_click)$")
+
+    # Required for kind="intent". Ignored for snap_and_click.
+    intent: str = Field(default="", min_length=0)
+    interval_minutes: float = Field(default=0.0, ge=0.0, le=24 * 60.0)
     # Same options as RunRequest. Snapshot of the chat-form controls at
     # the moment of creation; later changes to the UI don't affect
     # already-scheduled jobs.
@@ -91,9 +103,22 @@ class ScheduleCreateRequest(BaseModel):
     allow_llm_fallback: bool = True
     planner: str = "auto"
     ml_adapter: str | None = None
+
+    # Required for kind="snap_and_click". Ignored for intent.
+    x_pct: float | None = Field(default=None, ge=0.0, le=1.0)
+    y_pct: float | None = Field(default=None, ge=0.0, le=1.0)
+    snap_radius_pct: float = Field(default=0.05, gt=0.0, le=0.30)
+    button: str = Field(default="left", pattern="^(left|right|middle)$")
+    count: int = Field(default=1, ge=1, le=3)
+    # Seconds-granular cadence for snap_and_click. The intent-kind
+    # scheduler uses minutes (long-cycle build status checks etc); the
+    # snap-and-click case wants short, polling-style cadence ("every
+    # 30 s, click the button if it's there").
+    interval_seconds: float = Field(default=0.0, ge=0.0, le=24 * 3600.0)
+
     # When True, the first fire happens immediately on create (and the
-    # next is +interval_minutes from then). False = wait one full
-    # interval before the first fire.
+    # next is +interval from then). False = wait one full interval
+    # before the first fire.
     fire_immediately: bool = False
 
 
@@ -126,6 +151,34 @@ class MouseClickAtRequest(BaseModel):
     # Optional overrides; defaults come from settings.commander.
     screen_width: int | None = Field(default=None, gt=0)
     screen_height: int | None = Field(default=None, gt=0)
+
+
+class SnapAndClickRequest(BaseModel):
+    """Find the nearest snap-able UI element to an aim point and click it.
+
+    Captures a fresh frame, runs the snap finder (saturation fast-path
+    then DINOv2 multi-seed fallback), and — when a snap target is found
+    within ``snap_radius_pct`` — drives the cursor there via the usual
+    visual-servo click_at path. Returns whether a click happened.
+
+    Use cases:
+      - click a button only when it's present (otherwise no-op)
+      - watch for a confirmation dialog and dismiss it
+      - click a recurring widget (next-page arrow, accept prompt) on
+        an interval via the scheduler
+    """
+    x_pct: float = Field(ge=0.0, le=1.0)
+    y_pct: float = Field(ge=0.0, le=1.0)
+    button: str = Field(default="left", pattern="^(left|right|middle)$")
+    count: int = Field(default=1, ge=1, le=3)
+    # Image-percent radius around (x_pct, y_pct) within which the
+    # saturation/DINO finder will accept a snap target. Default 5 %%
+    # ≈ 100 px on 1920w ≈ half a button width.
+    snap_radius_pct: float = Field(default=0.05, gt=0.0, le=0.30)
+    # When True (default) and no snap target is found, the endpoint
+    # returns 200 with ``clicked: false`` rather than firing a click
+    # at the bare aim. Set False to fall back to a regular click_at.
+    require_snap: bool = True
 
 
 class MouseDragRequest(BaseModel):
@@ -976,6 +1029,102 @@ def create_app(
                 if mouse is not None:
                     try: await mouse.disconnect()
                     except Exception: pass
+
+    async def _capture_one_frame_bgr():
+        """Grab a single fresh BGR frame from the configured capture
+        source. Used by /api/snap-and-click and the snap scheduler to
+        avoid relying on a possibly-stale frame from the store.
+        """
+        if settings is None:
+            return None
+        use_self = bool(
+            app.state.runtime_state.get("use_self_capture", False)
+        )
+        resolution = None
+        if (settings.capture.resolution_width
+                and settings.capture.resolution_height):
+            resolution = (
+                settings.capture.resolution_width,
+                settings.capture.resolution_height,
+            )
+        if use_self:
+            from handsneyes.core.capture.screen import ScreenCapture
+            cap = ScreenCapture(
+                display_index=settings.capture.device_index,
+            )
+        else:
+            from handsneyes.core.capture.webcam import WebcamCapture
+            cap = WebcamCapture(
+                device_index=settings.capture.device_index,
+                resolution=resolution,
+            )
+        try:
+            await asyncio.wait_for(cap.open(), timeout=10.0)
+            await asyncio.sleep(0.15)
+            frame = await cap.capture_frame()
+            return frame.image
+        finally:
+            try:
+                await cap.close()
+            except Exception:
+                pass
+
+    @app.post("/api/snap-and-click")
+    async def snap_and_click(req: SnapAndClickRequest) -> JSONResponse:
+        """Capture a fresh frame, find the snap-able UI element nearest
+        the aim, and click it. No-op if no snap target is within
+        ``snap_radius_pct`` and ``require_snap`` is True.
+        """
+        if runner.is_busy():
+            raise HTTPException(409, "a run is currently in progress")
+        from handsneyes.core.vision.dino_snap import find_snap_target
+
+        async with _manual_capture_lock:
+            frame_bgr = await _capture_one_frame_bgr()
+        if frame_bgr is None:
+            raise HTTPException(503, "capture unavailable")
+
+        aim = (req.x_pct, req.y_pct)
+        snap = find_snap_target(
+            frame_bgr, aim,
+            snap_radius_pct=req.snap_radius_pct,
+        )
+        if snap is None:
+            if req.require_snap:
+                return JSONResponse({
+                    "ok": True, "clicked": False,
+                    "reason": "no_snap_target",
+                    "aim": [aim[0], aim[1]],
+                    "snap": None,
+                })
+            click_xy = aim
+            snap_reason = "no_snap_fallback_to_aim"
+        else:
+            click_xy = snap
+            snap_reason = "snap_found"
+
+        # Hand off to the homer via the existing click_at logic. We
+        # build a MouseClickAtRequest and call the route function
+        # directly — same lock, same caching, same kept-warm context.
+        click_req = MouseClickAtRequest(
+            x_pct=click_xy[0], y_pct=click_xy[1],
+            button=req.button, count=req.count,
+        )
+        click_resp = await mouse_click_at(click_req)
+        # mouse_click_at returns a JSONResponse — peel it back to a
+        # dict so we can attach our snap metadata.
+        try:
+            import json as _json
+            click_body = _json.loads(click_resp.body)
+        except Exception:
+            click_body = {}
+        return JSONResponse({
+            "ok": True, "clicked": True,
+            "reason": snap_reason,
+            "aim": [aim[0], aim[1]],
+            "snap": [click_xy[0], click_xy[1]],
+            "click": click_body,
+        })
 
     @app.post("/api/mouse/click_at")
     async def mouse_click_at(req: MouseClickAtRequest) -> JSONResponse:
@@ -2815,7 +2964,9 @@ def create_app(
         job = app.state.schedules.get(job_id)
         if job is None:
             return
-        interval_s = job["interval_minutes"] * 60.0
+        interval_s = float(job["interval_s"])
+        if interval_s <= 0:
+            return
         # First-fire: either now (fire_immediately) or after one interval.
         if job["fire_immediately"]:
             await _scheduler_fire_once(job_id)
@@ -2823,7 +2974,7 @@ def create_app(
         # doesn't shift the cadence. The loop computes the next fire
         # time from the original anchor, not from "now".
         anchor = job["created_at"]
-        n = 1 if not job["fire_immediately"] else 1
+        n = 1
         while job_id in app.state.schedules:
             target = anchor + n * interval_s
             now = _time_local.time()
@@ -2852,8 +3003,45 @@ def create_app(
                 run_id=None,
             ))
             return
+        kind = job.get("kind", "intent")
         opts = job["options"]
         try:
+            if kind == "snap_and_click":
+                snap_req = SnapAndClickRequest(
+                    x_pct=opts["x_pct"], y_pct=opts["y_pct"],
+                    button=opts.get("button", "left"),
+                    count=opts.get("count", 1),
+                    snap_radius_pct=opts.get("snap_radius_pct", 0.05),
+                    require_snap=True,
+                )
+                resp = await snap_and_click(snap_req)
+                import json as _json
+                try:
+                    body = _json.loads(resp.body)
+                except Exception:
+                    body = {}
+                job["last_fire_at"] = _time_local.time()
+                job["fire_count"] = job.get("fire_count", 0) + 1
+                if body.get("clicked"):
+                    job["last_click_at"] = _time_local.time()
+                    job["click_count"] = job.get("click_count", 0) + 1
+                    bus.publish(LogEvent(
+                        ts=_time_local.time(), level="INFO",
+                        source="scheduler",
+                        msg=f"[{job_id}] snap clicked at "
+                            f"{body.get('snap')}",
+                        run_id=None,
+                    ))
+                else:
+                    bus.publish(LogEvent(
+                        ts=_time_local.time(), level="DEBUG",
+                        source="scheduler",
+                        msg=f"[{job_id}] no snap target near "
+                            f"{[opts['x_pct'], opts['y_pct']]}",
+                        run_id=None,
+                    ))
+                return
+            # default: kind == "intent"
             rec = await runner.start(
                 intent=job["intent"],
                 no_focus=opts.get("no_focus", False),
@@ -2884,17 +3072,50 @@ def create_app(
     async def scheduler_create(req: ScheduleCreateRequest) -> JSONResponse:
         import time as _time_local
         import uuid as _uuid
+        # Resolve interval: snap_and_click uses seconds; intent uses
+        # minutes. Either field accepted as a fallback for the other.
+        if req.kind == "snap_and_click":
+            interval_s = (
+                req.interval_seconds
+                if req.interval_seconds > 0
+                else req.interval_minutes * 60.0
+            )
+            if interval_s <= 0:
+                raise HTTPException(
+                    400, "snap_and_click needs interval_seconds > 0",
+                )
+            if req.x_pct is None or req.y_pct is None:
+                raise HTTPException(
+                    400, "snap_and_click needs x_pct and y_pct",
+                )
+        else:
+            interval_s = (
+                req.interval_minutes * 60.0
+                if req.interval_minutes > 0
+                else req.interval_seconds
+            )
+            if interval_s <= 0:
+                raise HTTPException(
+                    400, "intent schedule needs interval_minutes > 0",
+                )
+            if not req.intent.strip():
+                raise HTTPException(400, "intent schedule needs an intent")
+
         job_id = _uuid.uuid4().hex[:8]
         job = {
             "id": job_id,
+            "kind": req.kind,
             "intent": req.intent,
-            "interval_minutes": req.interval_minutes,
+            "interval_s": interval_s,
+            "interval_minutes": interval_s / 60.0,  # UI display
             "created_at": _time_local.time(),
             "fire_immediately": req.fire_immediately,
             "fire_count": 0,
             "skipped_count": 0,
+            "click_count": 0,
             "last_fire_at": None,
             "last_skipped_at": None,
+            "last_click_at": None,
             "last_run_id": None,
             "last_error": None,
             "options": {
@@ -2908,6 +3129,11 @@ def create_app(
                 "allow_llm_fallback": req.allow_llm_fallback,
                 "planner": req.planner,
                 "ml_adapter": req.ml_adapter,
+                "x_pct": req.x_pct,
+                "y_pct": req.y_pct,
+                "snap_radius_pct": req.snap_radius_pct,
+                "button": req.button,
+                "count": req.count,
             },
         }
         app.state.schedules[job_id] = job
