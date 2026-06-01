@@ -225,58 +225,75 @@ def find_snap_target(
     patch_size_px = roi_size_px / grid
     aim_patch_col = min(grid - 1, max(0, int(aim_in_roi_x / patch_size_px)))
     aim_patch_row = min(grid - 1, max(0, int(aim_in_roi_y / patch_size_px)))
-    aim_patch_idx = aim_patch_row * grid + aim_patch_col
 
     # Normalise features for cosine similarity.
     patches_n = patches / (
         patches.norm(dim=-1, keepdim=True) + 1e-6
     )
-    seed = patches_n[aim_patch_idx]
-    sims = (patches_n @ seed).cpu().numpy().reshape(grid, grid)
 
-    # Threshold + connected components in the patch grid.
-    mask = (sims >= similarity_threshold).astype(np.uint8)
-    if mask.sum() == 0:
-        return None
-    num_labels, labels = cv2.connectedComponents(mask, connectivity=8)
-    aim_label = labels[aim_patch_row, aim_patch_col]
-    if aim_label == 0:
-        # Aim patch wasn't in any high-similarity component — the
-        # seed patch is an outlier. Nothing to snap to.
-        return None
-
-    rows, cols = np.where(labels == aim_label)
-    if len(rows) == 0:
-        return None
-
-    # Background rejection. If the component covers more than half
-    # the ROI it's almost certainly the page background (white
-    # space, panel body, modal backdrop), NOT a discrete clickable
-    # UI element. Its centroid is wherever the background extends
-    # — which produces a systematic snap bias toward the page's
-    # centre of mass rather than any actual click target. Reject
-    # those and let the homer commit at its geometric aim.
+    # Multi-seed search. The aim point often lands on dark UI
+    # background just NEXT to the button the operator was targeting
+    # — seeding only at the aim patch produces a "background"
+    # component, which our rejection filter throws out, and the snap
+    # fails entirely. Instead we try every patch in the grid as a
+    # seed, accumulate all candidate components (deduped by which
+    # patches they cover), filter to "button-like" (not background,
+    # within snap radius of aim), and pick the candidate whose
+    # centroid is CLOSEST to aim. This handles "click near button"
+    # gracefully: a candidate-component on the actual button will
+    # always be closer to aim than candidates on the page background.
     total_patches = grid * grid
-    if len(rows) > 0.45 * total_patches:
+    MIN_BUTTON_PATCHES = 2
+    MAX_BUTTON_FRACTION = 0.30
+
+    # Full pairwise similarity matrix (cheap at grid=16: 256×256).
+    sims_all = (patches_n @ patches_n.T).cpu().numpy()
+
+    seen_components: set[frozenset[int]] = set()
+    best: tuple[float, tuple[float, float]] | None = None
+
+    for seed_idx in range(total_patches):
+        sims_seed = sims_all[seed_idx].reshape(grid, grid)
+        mask = (sims_seed >= similarity_threshold).astype(np.uint8)
+        if mask.sum() < MIN_BUTTON_PATCHES:
+            continue
+        _, labels = cv2.connectedComponents(mask, connectivity=8)
+        seed_row = seed_idx // grid
+        seed_col = seed_idx % grid
+        seed_label = labels[seed_row, seed_col]
+        if seed_label == 0:
+            continue
+        rows, cols = np.where(labels == seed_label)
+        n_patches = len(rows)
+        if n_patches < MIN_BUTTON_PATCHES:
+            continue
+        if n_patches > MAX_BUTTON_FRACTION * total_patches:
+            # Looks like background / large panel.
+            continue
+        # Dedup: don't evaluate the same connected component twice
+        # from different seeds inside it.
+        comp_key = frozenset(int(r * grid + c) for r, c in zip(rows, cols))
+        if comp_key in seen_components:
+            continue
+        seen_components.add(comp_key)
+
+        cy_patch = float(rows.mean())
+        cx_patch = float(cols.mean())
+        cx_in_roi_px = (cx_patch + 0.5) * patch_size_px
+        cy_in_roi_px = (cy_patch + 0.5) * patch_size_px
+        snap_px_x = x0 + cx_in_roi_px
+        snap_px_y = y0 + cy_in_roi_px
+        snap_x_pct = snap_px_x / w
+        snap_y_pct = snap_px_y / h
+        dist = float(
+            ((snap_x_pct - aim_xy_pct[0]) ** 2
+             + (snap_y_pct - aim_xy_pct[1]) ** 2) ** 0.5
+        )
+        if dist > snap_radius_pct:
+            continue
+        if best is None or dist < best[0]:
+            best = (dist, (snap_x_pct, snap_y_pct))
+
+    if best is None:
         return None
-
-    # Centroid of the component in patch-grid coords, then back to
-    # full-frame pixels.
-    cy_patch = float(rows.mean())
-    cx_patch = float(cols.mean())
-    cx_in_roi_px = (cx_patch + 0.5) * patch_size_px
-    cy_in_roi_px = (cy_patch + 0.5) * patch_size_px
-    snap_px_x = x0 + cx_in_roi_px
-    snap_px_y = y0 + cy_in_roi_px
-    snap_pct = (snap_px_x / w, snap_px_y / h)
-
-    # Reject if the snap target moved further than snap_radius_pct
-    # — we don't want to jump to a different UI element entirely.
-    dist = float(
-        ((snap_pct[0] - aim_xy_pct[0]) ** 2
-         + (snap_pct[1] - aim_xy_pct[1]) ** 2) ** 0.5
-    )
-    if dist > snap_radius_pct:
-        return None
-
-    return snap_pct
+    return best[1]
