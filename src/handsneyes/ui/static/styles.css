@@ -864,3 +864,9 @@ body.col-resizing img { pointer-events: none; }
   background: rgba(120, 200, 255, 0.10);
   border-radius: 2px;
 }
+
+/* Pointer-accel save indicator: tiny inline status next to the
+   accel inputs. Auto-fades each state. */
+#opt-accel-saved.saved-pending { color: var(--muted, #999); }
+#opt-accel-saved.saved-ok      { color: var(--good, #6c6); }
+#opt-accel-saved.saved-err     { color: var(--bad, #c66); }

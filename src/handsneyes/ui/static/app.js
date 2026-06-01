@@ -93,10 +93,32 @@ const $optAccelY = document.getElementById("opt-accel-y");
       $optAccelY.value = (+j.scale_y).toFixed(2);
     })
     .catch(() => {});
-  const pushScale = async () => {
+
+  // Debounce the save so we don't pound the disk on every keystroke
+  // while the operator is mid-type — but still save MUCH sooner than
+  // change-on-blur. 350 ms after the last edit feels instant without
+  // firing a POST per digit.
+  let _saveTimer = null;
+  let _saveInFlight = false;
+  const SAVE_DEBOUNCE_MS = 350;
+  const $savedTag = document.getElementById("opt-accel-saved");
+
+  function _flash(state) {
+    if (!$savedTag) return;
+    $savedTag.textContent = state;
+    $savedTag.classList.remove("hidden", "saved-pending", "saved-ok", "saved-err");
+    if (state === "saving…") $savedTag.classList.add("saved-pending");
+    else if (state.startsWith("✓")) $savedTag.classList.add("saved-ok");
+    else $savedTag.classList.add("saved-err");
+  }
+
+  const doSave = async () => {
     const sx = parseFloat($optAccelX.value);
     const sy = parseFloat($optAccelY.value);
     if (!Number.isFinite(sx) || !Number.isFinite(sy)) return;
+    if (_saveInFlight) return;
+    _saveInFlight = true;
+    _flash("saving…");
     try {
       const r = await fetch("/api/pointer-accel-scale", {
         method: "POST",
@@ -104,23 +126,34 @@ const $optAccelY = document.getElementById("opt-accel-y");
         body: JSON.stringify({ scale_x: sx, scale_y: sy }),
       });
       if (!r.ok) {
+        _flash("✕ failed");
         appendSystemLog(
           "ERROR",
           `pointer-accel scale POST failed: ${r.status}`,
         );
       } else {
-        appendSystemLog(
-          "INFO",
-          `pointer-accel scale → x=${sx.toFixed(3)} y=${sy.toFixed(3)} ` +
-          "(applies on next run)",
-        );
+        _flash(`✓ saved (${sx.toFixed(2)}, ${sy.toFixed(2)})`);
       }
     } catch (e) {
+      _flash("✕ error");
       appendSystemLog("ERROR", `pointer-accel scale error: ${e}`);
+    } finally {
+      _saveInFlight = false;
     }
   };
-  $optAccelX.addEventListener("change", pushScale);
-  $optAccelY.addEventListener("change", pushScale);
+
+  const scheduleSave = () => {
+    if (_saveTimer) clearTimeout(_saveTimer);
+    _saveTimer = setTimeout(doSave, SAVE_DEBOUNCE_MS);
+  };
+
+  // "input" fires on every keystroke / spinner click, "change" fires
+  // on blur. Wire both so the value gets saved fast regardless of how
+  // the operator interacted with the field.
+  $optAccelX.addEventListener("input", scheduleSave);
+  $optAccelY.addEventListener("input", scheduleSave);
+  $optAccelX.addEventListener("change", scheduleSave);
+  $optAccelY.addEventListener("change", scheduleSave);
 })();
 
 const $optPlatform = document.getElementById("opt-platform");

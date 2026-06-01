@@ -1295,17 +1295,34 @@ class VisualServoHomer:
             pre_bulk = None
 
         # 4. Fire the calibrated bulk burst — by delta from the
-        #    current cursor position to the target.
+        #    current cursor position to the target. The pointer-accel
+        #    scale knob (UI "accel" inputs) is applied here as a
+        #    post-calibration override: scale 1.0 = trust the auto-
+        #    calibrated ratio verbatim; scale 0.9 = shrink the bulk
+        #    by 10 %% (use when the calibrated ratio over-reads, e.g.
+        #    a Retina-scaled host display that effective-resolution-
+        #    mismatches the capture card). The iterative correction
+        #    below still closes any residual, so even a wrong scale
+        #    converges — but a closer scale converges in fewer steps.
+        sx, sy = self._pointer_accel_scale()
         delta_x = x_pct - start_hotspot[0]
         delta_y = y_pct - start_hotspot[1]
-        hid_x = int(delta_x / rx)
-        hid_y = int(delta_y / ry)
-        print(
-            f"  Open-loop bulk → ({x_pct:.2%}, {y_pct:.2%}) "
-            f"from ({start_hotspot[0]:.2%},{start_hotspot[1]:.2%}) "
-            f"ratio=({rx*1000:.3f},{ry*1000:.3f})‰ "
-            f"hid=({hid_x:+d},{hid_y:+d})"
-        )
+        hid_x = int((delta_x / rx) * sx)
+        hid_y = int((delta_y / ry) * sy)
+        if sx != 1.0 or sy != 1.0:
+            print(
+                f"  Open-loop bulk → ({x_pct:.2%}, {y_pct:.2%}) "
+                f"from ({start_hotspot[0]:.2%},{start_hotspot[1]:.2%}) "
+                f"ratio=({rx*1000:.3f},{ry*1000:.3f})‰ "
+                f"scale=({sx:.3f},{sy:.3f}) hid=({hid_x:+d},{hid_y:+d})"
+            )
+        else:
+            print(
+                f"  Open-loop bulk → ({x_pct:.2%}, {y_pct:.2%}) "
+                f"from ({start_hotspot[0]:.2%},{start_hotspot[1]:.2%}) "
+                f"ratio=({rx*1000:.3f},{ry*1000:.3f})‰ "
+                f"hid=({hid_x:+d},{hid_y:+d})"
+            )
         await self._send_hid(hid_x, hid_y)
         await asyncio.sleep(0.35)
 
