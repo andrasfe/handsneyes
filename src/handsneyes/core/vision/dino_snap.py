@@ -108,6 +108,98 @@ def _try_load() -> bool:
             return False
 
 
+def _find_saturated_button(
+    frame_bgr: np.ndarray,
+    aim_xy_pct: tuple[float, float],
+    *,
+    cursor_xy_pct: Optional[tuple[float, float]] = None,
+    cursor_mask_radius_pct: float = 0.015,
+    snap_radius_pct: float = 0.03,
+    sat_threshold: int = 60,
+    brightness_threshold: int = 90,
+    min_blob_area_px: int = 60,
+    max_blob_area_pct: float = 0.005,
+) -> Optional[tuple[float, float]]:
+    """Find the centroid of the saturated-colored blob nearest the aim.
+
+    Pixel-precise alternative to DINO patch features for the common
+    case of a bright/coloured button on a dark UI background. Works on
+    ANY blob shape (rectangular Run buttons, round avatars, pills, etc)
+    and naturally rejects page backgrounds via the max-area cap.
+
+    Algorithm:
+      1. Convert frame to HSV.
+      2. Threshold for "saturated AND not-too-dark" pixels.
+      3. Connected components in the binary mask.
+      4. Filter components: min area (drop antialiasing speckle), max
+         area (drop large coloured panels like the macOS menu bar
+         gradient).
+      5. Among remaining blobs, pick the one whose centroid is closest
+         to the aim, capped by snap_radius_pct.
+
+    Returns the blob centroid in image-percent coords, or None if no
+    blob is near enough.
+    """
+    h, w = frame_bgr.shape[:2]
+    aim_px_x = int(aim_xy_pct[0] * w)
+    aim_px_y = int(aim_xy_pct[1] * h)
+
+    # Search window: 2 × snap_radius around aim (clip to frame).
+    win_r_x = int(snap_radius_pct * w * 1.5)
+    win_r_y = int(snap_radius_pct * h * 1.5)
+    x0 = max(0, aim_px_x - win_r_x)
+    y0 = max(0, aim_px_y - win_r_y)
+    x1 = min(w, aim_px_x + win_r_x)
+    y1 = min(h, aim_px_y + win_r_y)
+    if x1 - x0 < 10 or y1 - y0 < 10:
+        return None
+    roi = frame_bgr[y0:y1, x0:x1]
+
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    sat = hsv[..., 1]
+    val = hsv[..., 2]
+    mask = ((sat >= sat_threshold) & (val >= brightness_threshold)).astype(np.uint8)
+
+    if cursor_xy_pct is not None:
+        # Erase the cursor sprite (which is itself a saturated blob)
+        # so we don't snap to the cursor instead of the button.
+        cx_in_roi = int(cursor_xy_pct[0] * w) - x0
+        cy_in_roi = int(cursor_xy_pct[1] * h) - y0
+        if 0 <= cx_in_roi < (x1 - x0) and 0 <= cy_in_roi < (y1 - y0):
+            r_px = max(6, int(cursor_mask_radius_pct * w))
+            cv2.circle(mask, (cx_in_roi, cy_in_roi), r_px, 0, thickness=-1)
+
+    # Morphological close to merge adjacent text glyphs ("Run" + arrow)
+    # into a single blob — they're visually one button.
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        mask, connectivity=8,
+    )
+    if n_labels <= 1:
+        return None
+
+    max_area_px = int(max_blob_area_pct * w * h)
+    best: tuple[float, tuple[float, float]] | None = None
+    for i in range(1, n_labels):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < min_blob_area_px or area > max_area_px:
+            continue
+        cx_in_roi = float(centroids[i][0])
+        cy_in_roi = float(centroids[i][1])
+        snap_x = (x0 + cx_in_roi) / w
+        snap_y = (y0 + cy_in_roi) / h
+        dx = snap_x - aim_xy_pct[0]
+        dy = snap_y - aim_xy_pct[1]
+        dist = (dx * dx + dy * dy) ** 0.5
+        if dist > snap_radius_pct:
+            continue
+        if best is None or dist < best[0]:
+            best = (dist, (snap_x, snap_y))
+    return best[1] if best else None
+
+
 def find_snap_target(
     frame_bgr: np.ndarray,
     aim_xy_pct: tuple[float, float],
@@ -141,6 +233,21 @@ def find_snap_target(
             - the resulting centroid is more than snap_radius_pct
               from the original aim
     """
+    # Fast path: saturation-based blob finder. For typical bright
+    # buttons on a dark UI (Cursor's Run, GitHub's Merge, most modal
+    # CTAs), this nails the centroid to pixel precision and skips
+    # DINO entirely. Returns None if there's no saturated blob within
+    # snap_radius — at which point we fall through to DINO for low-
+    # saturation UI (system buttons, text links, monochrome icons).
+    sat_snap = _find_saturated_button(
+        frame_bgr, aim_xy_pct,
+        cursor_xy_pct=cursor_xy_pct,
+        cursor_mask_radius_pct=cursor_mask_radius_pct,
+        snap_radius_pct=snap_radius_pct,
+    )
+    if sat_snap is not None:
+        return sat_snap
+
     if not _try_load():
         return None
 
