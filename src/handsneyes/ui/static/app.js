@@ -1250,6 +1250,30 @@ if ($schedModalSubmit) $schedModalSubmit.addEventListener("click", submitSchedMo
 // ── Watch & Click modal (snap-and-click scheduler) ────────────────
 const $btnWatchClick = document.getElementById("btn-watch-click");
 const $watchModal = document.getElementById("watch-modal");
+const $aimPickBanner = document.getElementById("aim-pick-banner");
+// When true, the next frame click is consumed to set the watcher aim
+// instead of firing a host click_at. Set by the Watch & Click button,
+// cleared by the click that captures the aim (or by Escape / Cancel).
+let _pickingAim = false;
+
+function _enterAimPickMode() {
+  _pickingAim = true;
+  if ($frame) $frame.classList.add("aim-picking");
+  if ($aimPickBanner) $aimPickBanner.classList.remove("hidden");
+}
+function _exitAimPickMode() {
+  _pickingAim = false;
+  if ($frame) $frame.classList.remove("aim-picking");
+  if ($aimPickBanner) $aimPickBanner.classList.add("hidden");
+}
+// Escape cancels aim picking without consuming any click.
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && _pickingAim) {
+    e.preventDefault();
+    _exitAimPickMode();
+    appendSystemLog("INFO", "Watch & Click: aim pick cancelled");
+  }
+});
 const $watchModalClose = document.getElementById("watch-modal-close");
 const $watchModalCancel = document.getElementById("watch-modal-cancel");
 const $watchModalSubmit = document.getElementById("watch-modal-submit");
@@ -1392,7 +1416,38 @@ async function submitWatchModal() {
   }
 }
 
-if ($btnWatchClick) $btnWatchClick.addEventListener("click", openWatchModal);
+const $watchRepickAim = document.getElementById("watch-repick-aim");
+if ($watchRepickAim) {
+  $watchRepickAim.addEventListener("click", () => {
+    closeWatchModal();
+    _enterAimPickMode();
+    appendSystemLog(
+      "INFO",
+      "Watch & Click: click the frame to pick a new aim "
+      + "(Escape to cancel)",
+    );
+  });
+}
+
+function onWatchClickButton() {
+  // First press without an aim set → arm the aim picker. The next
+  // frame click is consumed to set the watcher target without
+  // firing a host click. Subsequent presses (aim already set) open
+  // the modal directly so the operator can adjust or add another
+  // watcher at the same spot.
+  if (_lastFrameClickPct == null) {
+    _enterAimPickMode();
+    appendSystemLog(
+      "INFO",
+      "Watch & Click: click the frame to pick the watch aim "
+      + "(Escape to cancel)",
+    );
+    return;
+  }
+  openWatchModal();
+}
+
+if ($btnWatchClick) $btnWatchClick.addEventListener("click", onWatchClickButton);
 if ($watchModalClose) $watchModalClose.addEventListener("click", closeWatchModal);
 if ($watchModalCancel) $watchModalCancel.addEventListener("click", closeWatchModal);
 if ($watchModalSubmit) $watchModalSubmit.addEventListener("click", submitWatchModal);
@@ -1809,6 +1864,24 @@ $frame.addEventListener("click", (e) => {
   if (x < 0 || y < 0 || x > rect.width || y > rect.height) return;
   const x_pct = Math.max(0, Math.min(1, x / rect.width));
   const y_pct = Math.max(0, Math.min(1, y / rect.height));
+  // Aim-picker mode: the Watch & Click button armed an "aim pick"
+  // so the next frame click is consumed to set the watcher target
+  // — it does NOT fire click_at on the host. Mode self-clears once
+  // a click is captured.
+  if (_pickingAim) {
+    _pickingAim = false;
+    if ($frame) $frame.classList.remove("aim-picking");
+    if ($aimPickBanner) $aimPickBanner.classList.add("hidden");
+    showClickMarker(e.clientX, e.clientY);
+    recordFrameClick(x_pct, y_pct);
+    appendSystemLog(
+      "INFO",
+      `aim set for Watch & Click: (${(x_pct * 100).toFixed(1)}%, ` +
+      `${(y_pct * 100).toFixed(1)}%)`,
+    );
+    openWatchModal();
+    return;
+  }
   // Wait DBL_CLICK_MS for a possible second click. If one comes,
   // the dblclick handler cancels this timer and fires its own action
   // instead — no homing, just a double-click at the current cursor.

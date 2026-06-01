@@ -266,6 +266,11 @@
     </div>
   </div>
 
+  <!-- Floating banner: visible while the aim-pick mode is armed. -->
+  <div id="aim-pick-banner" class="aim-pick-banner hidden">
+    Click on the frame to set the Watch &amp; Click aim — Esc to cancel
+  </div>
+
   <!-- Watch & Click modal: schedule a recurring snap-and-click at the
        location of the most recent frame click. -->
   <div id="watch-modal" class="modal hidden" aria-hidden="true">
@@ -277,6 +282,7 @@
       <div class="modal-body">
         <div id="watch-aim-info" class="modal-hint">
           aim: <span id="watch-aim-coords">(none — click on the frame first)</span>
+          <button id="watch-repick-aim" type="button" class="link-btn" style="margin-left:8px;">re-pick…</button>
         </div>
         <label class="modal-label">Check every
           <input id="watch-interval" type="number" min="0.5" step="0.5" value="5" style="width:6em;" />
