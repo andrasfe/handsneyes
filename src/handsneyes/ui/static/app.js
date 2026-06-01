@@ -1251,29 +1251,121 @@ if ($schedModalSubmit) $schedModalSubmit.addEventListener("click", submitSchedMo
 const $btnWatchClick = document.getElementById("btn-watch-click");
 const $watchModal = document.getElementById("watch-modal");
 const $aimPickBanner = document.getElementById("aim-pick-banner");
-// When true, the next frame click is consumed to set the watcher aim
-// instead of firing a host click_at. Set by the Watch & Click button,
-// cleared by the click that captures the aim (or by Escape / Cancel).
-let _pickingAim = false;
+// Rectangle-pick state. When _pickingRect is true the frame goes into
+// drag-to-draw mode: mousedown starts the rect, mousemove rubber-bands
+// it, mouseup commits the rect AS the watcher search area and opens
+// the modal. Plain click_at is suppressed for the duration. The cc
+// frame click_at handler skips its own work when _pickingRect is set.
+let _pickingRect = false;
+let _rectDrawing = false;
+let _rectStart = null;           // {x_pct, y_pct, clientX, clientY}
+let _lastWatchRect = null;       // {x0, y0, x1, y1} in image-percent
+let _rectOverlayEl = null;       // ephemeral DOM box during draw
 
 function _enterAimPickMode() {
-  _pickingAim = true;
+  _pickingRect = true;
+  _rectDrawing = false;
+  _rectStart = null;
   if ($frame) $frame.classList.add("aim-picking");
   if ($aimPickBanner) $aimPickBanner.classList.remove("hidden");
 }
 function _exitAimPickMode() {
-  _pickingAim = false;
+  _pickingRect = false;
+  _rectDrawing = false;
+  _rectStart = null;
   if ($frame) $frame.classList.remove("aim-picking");
   if ($aimPickBanner) $aimPickBanner.classList.add("hidden");
+  if (_rectOverlayEl && _rectOverlayEl.parentNode) {
+    _rectOverlayEl.parentNode.removeChild(_rectOverlayEl);
+  }
+  _rectOverlayEl = null;
 }
-// Escape cancels aim picking without consuming any click.
+function _ensureRectOverlay() {
+  if (_rectOverlayEl) return _rectOverlayEl;
+  _rectOverlayEl = document.createElement("div");
+  _rectOverlayEl.className = "rect-pick-overlay";
+  document.body.appendChild(_rectOverlayEl);
+  return _rectOverlayEl;
+}
+function _drawRectOverlay(x1, y1, x2, y2) {
+  const el = _ensureRectOverlay();
+  const left = Math.min(x1, x2);
+  const top = Math.min(y1, y2);
+  const w = Math.abs(x2 - x1);
+  const h = Math.abs(y2 - y1);
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+  el.style.width = `${w}px`;
+  el.style.height = `${h}px`;
+}
+// Escape cancels rect-pick without committing.
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && _pickingAim) {
+  if (e.key === "Escape" && _pickingRect) {
     e.preventDefault();
     _exitAimPickMode();
-    appendSystemLog("INFO", "Watch & Click: aim pick cancelled");
+    appendSystemLog("INFO", "Watch & Click: area pick cancelled");
   }
 });
+
+// Rectangle drag handlers — only active while _pickingRect.
+$frame.addEventListener("mousedown", (e) => {
+  if (!_pickingRect) return;
+  if (e.button !== 0) return;
+  if ($frame.classList.contains("empty")) return;
+  const rect = imageRect();
+  if (!rect) return;
+  const lx = e.clientX - rect.left;
+  const ly = e.clientY - rect.top;
+  if (lx < 0 || ly < 0 || lx > rect.width || ly > rect.height) return;
+  e.preventDefault();
+  e.stopPropagation();
+  _rectDrawing = true;
+  _rectStart = {
+    x_pct: Math.max(0, Math.min(1, lx / rect.width)),
+    y_pct: Math.max(0, Math.min(1, ly / rect.height)),
+    clientX: e.clientX, clientY: e.clientY,
+  };
+  _drawRectOverlay(e.clientX, e.clientY, e.clientX, e.clientY);
+}, true);  // capture so we run before the existing drag/click handlers
+window.addEventListener("mousemove", (e) => {
+  if (!_rectDrawing || !_rectStart) return;
+  _drawRectOverlay(
+    _rectStart.clientX, _rectStart.clientY,
+    e.clientX, e.clientY,
+  );
+});
+window.addEventListener("mouseup", (e) => {
+  if (!_rectDrawing || !_rectStart) return;
+  const rect = imageRect();
+  if (!rect) { _exitAimPickMode(); return; }
+  const lx = e.clientX - rect.left;
+  const ly = e.clientY - rect.top;
+  const end_x_pct = Math.max(0, Math.min(1, lx / rect.width));
+  const end_y_pct = Math.max(0, Math.min(1, ly / rect.height));
+  const x0 = Math.min(_rectStart.x_pct, end_x_pct);
+  const y0 = Math.min(_rectStart.y_pct, end_y_pct);
+  const x1 = Math.max(_rectStart.x_pct, end_x_pct);
+  const y1 = Math.max(_rectStart.y_pct, end_y_pct);
+  _exitAimPickMode();
+  if (x1 - x0 < 0.005 || y1 - y0 < 0.005) {
+    appendSystemLog(
+      "ERROR",
+      "Watch & Click: rectangle too small — drag a larger area.",
+    );
+    return;
+  }
+  // Suppress the synthetic click that fires after mouseup so the
+  // existing click_at handler doesn't fire a stray host click.
+  _suppressNextClick = true;
+  setTimeout(() => { _suppressNextClick = false; }, 100);
+  _lastWatchRect = { x0, y0, x1, y1 };
+  appendSystemLog(
+    "INFO",
+    `Watch & Click area: (${(x0*100).toFixed(1)}%, ${(y0*100).toFixed(1)}%) → ` +
+    `(${(x1*100).toFixed(1)}%, ${(y1*100).toFixed(1)}%)`,
+  );
+  openWatchModal();
+}, true);
 const $watchModalClose = document.getElementById("watch-modal-close");
 const $watchModalCancel = document.getElementById("watch-modal-cancel");
 const $watchModalSubmit = document.getElementById("watch-modal-submit");
@@ -1314,12 +1406,15 @@ async function refreshWatchList() {
     for (const job of jobs) {
       const li = document.createElement("li");
       const opts = job.options || {};
-      const xp = (opts.x_pct || 0) * 100;
-      const yp = (opts.y_pct || 0) * 100;
+      const x0 = (opts.x0_pct || 0) * 100;
+      const y0 = (opts.y0_pct || 0) * 100;
+      const x1 = (opts.x1_pct || 0) * 100;
+      const y1 = (opts.y1_pct || 0) * 100;
       const intervalS = (job.interval_minutes || 0) * 60;
       const meta = document.createElement("div");
       meta.innerHTML =
-        `<div><b>watch (${xp.toFixed(1)}%, ${yp.toFixed(1)}%)</b></div>` +
+        `<div><b>watch rect (${x0.toFixed(1)}%, ${y0.toFixed(1)}%) → ` +
+        `(${x1.toFixed(1)}%, ${y1.toFixed(1)}%)</b></div>` +
         `<div class="sched-job-meta">every ${intervalS.toFixed(1)}s · ` +
         `checked ${job.fire_count || 0}× · clicked ${job.click_count || 0}×` +
         (job.last_error ? ` · last error: ${escapeHtml(job.last_error)}` : "") +
@@ -1347,12 +1442,13 @@ async function refreshWatchList() {
 
 function openWatchModal() {
   if (!$watchModal) return;
-  if (_lastFrameClickPct && $watchAimCoords) {
+  if (_lastWatchRect && $watchAimCoords) {
+    const r = _lastWatchRect;
     $watchAimCoords.textContent =
-      `(${(_lastFrameClickPct.x * 100).toFixed(1)}%, ` +
-      `${(_lastFrameClickPct.y * 100).toFixed(1)}%)`;
+      `(${(r.x0 * 100).toFixed(1)}%, ${(r.y0 * 100).toFixed(1)}%) → ` +
+      `(${(r.x1 * 100).toFixed(1)}%, ${(r.y1 * 100).toFixed(1)}%)`;
   } else if ($watchAimCoords) {
-    $watchAimCoords.textContent = "(none — click on the frame first)";
+    $watchAimCoords.textContent = "(none — drag a rectangle on the frame first)";
   }
   $watchModal.classList.remove("hidden");
   $watchModal.setAttribute("aria-hidden", "false");
@@ -1366,21 +1462,16 @@ function closeWatchModal() {
 }
 
 async function submitWatchModal() {
-  if (!_lastFrameClickPct) {
+  if (!_lastWatchRect) {
     appendSystemLog(
       "ERROR",
-      "Watch & Click: no aim yet — click on the frame first to set it.",
+      "Watch & Click: no search area yet — drag a rectangle on the frame first.",
     );
     return;
   }
   const interval_seconds = parseFloat($watchInterval.value);
-  const snap_radius_pct = parseFloat($watchRadius.value);
   if (!Number.isFinite(interval_seconds) || interval_seconds <= 0) {
     $watchInterval.focus();
-    return;
-  }
-  if (!Number.isFinite(snap_radius_pct) || snap_radius_pct <= 0) {
-    $watchRadius.focus();
     return;
   }
   $watchModalSubmit.disabled = true;
@@ -1390,9 +1481,10 @@ async function submitWatchModal() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         kind: "snap_and_click",
-        x_pct: _lastFrameClickPct.x,
-        y_pct: _lastFrameClickPct.y,
-        snap_radius_pct,
+        x0_pct: _lastWatchRect.x0,
+        y0_pct: _lastWatchRect.y0,
+        x1_pct: _lastWatchRect.x1,
+        y1_pct: _lastWatchRect.y1,
         interval_seconds,
         fire_immediately: $watchFireNow.checked,
       }),
@@ -1402,11 +1494,11 @@ async function submitWatchModal() {
       window.alert(`watcher create failed: ${r.status} ${t}`);
       return;
     }
+    const r0 = _lastWatchRect;
     appendSystemLog(
       "INFO",
-      `watching (${(_lastFrameClickPct.x * 100).toFixed(1)}%, ` +
-      `${(_lastFrameClickPct.y * 100).toFixed(1)}%) every ${interval_seconds}s ` +
-      `(snap radius ${(snap_radius_pct * 100).toFixed(1)}%)`,
+      `watching rect (${(r0.x0*100).toFixed(1)}%, ${(r0.y0*100).toFixed(1)}%) → ` +
+      `(${(r0.x1*100).toFixed(1)}%, ${(r0.y1*100).toFixed(1)}%) every ${interval_seconds}s`,
     );
     await refreshWatchList();
   } catch (e) {
@@ -1423,23 +1515,22 @@ if ($watchRepickAim) {
     _enterAimPickMode();
     appendSystemLog(
       "INFO",
-      "Watch & Click: click the frame to pick a new aim "
+      "Watch & Click: drag a new rectangle on the frame "
       + "(Escape to cancel)",
     );
   });
 }
 
 function onWatchClickButton() {
-  // First press without an aim set → arm the aim picker. The next
-  // frame click is consumed to set the watcher target without
-  // firing a host click. Subsequent presses (aim already set) open
-  // the modal directly so the operator can adjust or add another
-  // watcher at the same spot.
-  if (_lastFrameClickPct == null) {
+  // First press without a saved rect → arm the rect picker. The next
+  // drag on the frame defines the search area (no host click fires).
+  // Subsequent presses (rect already drawn) open the modal directly
+  // so the operator can adjust or add another watcher.
+  if (_lastWatchRect == null) {
     _enterAimPickMode();
     appendSystemLog(
       "INFO",
-      "Watch & Click: click the frame to pick the watch aim "
+      "Watch & Click: drag a rectangle on the frame to set the search area "
       + "(Escape to cancel)",
     );
     return;
@@ -1864,24 +1955,11 @@ $frame.addEventListener("click", (e) => {
   if (x < 0 || y < 0 || x > rect.width || y > rect.height) return;
   const x_pct = Math.max(0, Math.min(1, x / rect.width));
   const y_pct = Math.max(0, Math.min(1, y / rect.height));
-  // Aim-picker mode: the Watch & Click button armed an "aim pick"
-  // so the next frame click is consumed to set the watcher target
-  // — it does NOT fire click_at on the host. Mode self-clears once
-  // a click is captured.
-  if (_pickingAim) {
-    _pickingAim = false;
-    if ($frame) $frame.classList.remove("aim-picking");
-    if ($aimPickBanner) $aimPickBanner.classList.add("hidden");
-    showClickMarker(e.clientX, e.clientY);
-    recordFrameClick(x_pct, y_pct);
-    appendSystemLog(
-      "INFO",
-      `aim set for Watch & Click: (${(x_pct * 100).toFixed(1)}%, ` +
-      `${(y_pct * 100).toFixed(1)}%)`,
-    );
-    openWatchModal();
-    return;
-  }
+  // Rect-pick mode suppresses ordinary click_at — the dedicated
+  // mousedown/mouseup handlers above commit the rectangle and open
+  // the watch modal. If a click event leaks through (e.g. the user
+  // released without moving), don't fire a host click_at.
+  if (_pickingRect) return;
   // Wait DBL_CLICK_MS for a possible second click. If one comes,
   // the dblclick handler cancels this timer and fires its own action
   // instead — no homing, just a double-click at the current cursor.

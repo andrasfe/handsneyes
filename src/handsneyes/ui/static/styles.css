@@ -853,3 +853,14 @@ body.col-resizing img { pointer-events: none; }
   padding: 0;
   font-size: inherit;
 }
+
+/* Live rectangle overlay drawn while the Watch & Click area picker
+   is armed. Positioned in viewport coords by JS during drag. */
+.rect-pick-overlay {
+  position: fixed;
+  pointer-events: none;
+  z-index: 9998;
+  border: 2px dashed var(--accent, #6cf);
+  background: rgba(120, 200, 255, 0.10);
+  border-radius: 2px;
+}

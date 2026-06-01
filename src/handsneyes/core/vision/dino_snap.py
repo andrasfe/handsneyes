@@ -108,6 +108,81 @@ def _try_load() -> bool:
             return False
 
 
+def find_snap_target_in_rect(
+    frame_bgr: np.ndarray,
+    rect_pct: tuple[float, float, float, float],
+    *,
+    cursor_xy_pct: Optional[tuple[float, float]] = None,
+    cursor_mask_radius_pct: float = 0.015,
+    sat_threshold: int = 60,
+    brightness_threshold: int = 90,
+    min_blob_area_px: int = 60,
+    max_blob_area_pct: float = 0.50,
+) -> Optional[tuple[float, float]]:
+    """Find the largest saturated-colored blob inside a rectangle.
+
+    Use case: the operator drew a rectangle around the area where a
+    button periodically appears. We don't know where exactly inside
+    the rect the button will land, and there's no single "aim point"
+    — we just want any clickable thing in there. So we scan the
+    rectangle for saturated blobs and return the centroid of the
+    LARGEST one (by area). Ties broken by blob area; rejecting
+    components larger than 50%% of the search rect catches the case
+    where the operator drew a rect that included a large coloured
+    panel (the panel would otherwise win on area).
+
+    rect_pct is (x0_pct, y0_pct, x1_pct, y1_pct) in image-percent.
+    Returns the blob centroid in image-percent coords, or None.
+    """
+    h, w = frame_bgr.shape[:2]
+    x0_p, y0_p, x1_p, y1_p = rect_pct
+    if x1_p <= x0_p or y1_p <= y0_p:
+        return None
+    x0 = max(0, int(x0_p * w))
+    y0 = max(0, int(y0_p * h))
+    x1 = min(w, int(x1_p * w))
+    y1 = min(h, int(y1_p * h))
+    if x1 - x0 < 10 or y1 - y0 < 10:
+        return None
+    roi = frame_bgr[y0:y1, x0:x1]
+    rect_area = (x1 - x0) * (y1 - y0)
+
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    sat = hsv[..., 1]
+    val = hsv[..., 2]
+    mask = ((sat >= sat_threshold) & (val >= brightness_threshold)).astype(np.uint8)
+
+    if cursor_xy_pct is not None:
+        cx_in_roi = int(cursor_xy_pct[0] * w) - x0
+        cy_in_roi = int(cursor_xy_pct[1] * h) - y0
+        if 0 <= cx_in_roi < (x1 - x0) and 0 <= cy_in_roi < (y1 - y0):
+            r_px = max(6, int(cursor_mask_radius_pct * w))
+            cv2.circle(mask, (cx_in_roi, cy_in_roi), r_px, 0, thickness=-1)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    n_labels, _, stats, centroids = cv2.connectedComponentsWithStats(
+        mask, connectivity=8,
+    )
+    if n_labels <= 1:
+        return None
+
+    max_area_px = int(max_blob_area_pct * rect_area)
+    best: tuple[int, tuple[float, float]] | None = None
+    for i in range(1, n_labels):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < min_blob_area_px or area > max_area_px:
+            continue
+        cx_in_roi = float(centroids[i][0])
+        cy_in_roi = float(centroids[i][1])
+        snap_x = (x0 + cx_in_roi) / w
+        snap_y = (y0 + cy_in_roi) / h
+        if best is None or area > best[0]:
+            best = (area, (snap_x, snap_y))
+    return best[1] if best else None
+
+
 def _find_saturated_button(
     frame_bgr: np.ndarray,
     aim_xy_pct: tuple[float, float],

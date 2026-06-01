@@ -105,9 +105,11 @@ class ScheduleCreateRequest(BaseModel):
     ml_adapter: str | None = None
 
     # Required for kind="snap_and_click". Ignored for intent.
-    x_pct: float | None = Field(default=None, ge=0.0, le=1.0)
-    y_pct: float | None = Field(default=None, ge=0.0, le=1.0)
-    snap_radius_pct: float = Field(default=0.05, gt=0.0, le=0.30)
+    # Rectangle in image-percent that bounds the search region.
+    x0_pct: float | None = Field(default=None, ge=0.0, le=1.0)
+    y0_pct: float | None = Field(default=None, ge=0.0, le=1.0)
+    x1_pct: float | None = Field(default=None, ge=0.0, le=1.0)
+    y1_pct: float | None = Field(default=None, ge=0.0, le=1.0)
     button: str = Field(default="left", pattern="^(left|right|middle)$")
     count: int = Field(default=1, ge=1, le=3)
     # Seconds-granular cadence for snap_and_click. The intent-kind
@@ -154,30 +156,33 @@ class MouseClickAtRequest(BaseModel):
 
 
 class SnapAndClickRequest(BaseModel):
-    """Find the nearest snap-able UI element to an aim point and click it.
+    """Find a snap-able UI element inside a search rectangle and click it.
 
-    Captures a fresh frame, runs the snap finder (saturation fast-path
-    then DINOv2 multi-seed fallback), and — when a snap target is found
-    within ``snap_radius_pct`` — drives the cursor there via the usual
-    visual-servo click_at path. Returns whether a click happened.
+    Captures a fresh frame, scans the rectangle for the largest
+    saturated-colored blob, and — when one is found — drives the cursor
+    to its centroid via the usual visual-servo click_at path. Returns
+    whether a click happened.
 
     Use cases:
-      - click a button only when it's present (otherwise no-op)
-      - watch for a confirmation dialog and dismiss it
-      - click a recurring widget (next-page arrow, accept prompt) on
-        an interval via the scheduler
+      - click a button only when it appears in a known area (no-op
+        otherwise)
+      - dismiss a confirmation dialog that pops up somewhere in a
+        known region
+      - click a recurring widget on an interval via the scheduler
+
+    The rectangle is given in image-percent: (x0, y0) is the top-left,
+    (x1, y1) the bottom-right. The operator typically draws this by
+    drag-selecting on the cc frame.
     """
-    x_pct: float = Field(ge=0.0, le=1.0)
-    y_pct: float = Field(ge=0.0, le=1.0)
+    x0_pct: float = Field(ge=0.0, le=1.0)
+    y0_pct: float = Field(ge=0.0, le=1.0)
+    x1_pct: float = Field(ge=0.0, le=1.0)
+    y1_pct: float = Field(ge=0.0, le=1.0)
     button: str = Field(default="left", pattern="^(left|right|middle)$")
     count: int = Field(default=1, ge=1, le=3)
-    # Image-percent radius around (x_pct, y_pct) within which the
-    # saturation/DINO finder will accept a snap target. Default 5 %%
-    # ≈ 100 px on 1920w ≈ half a button width.
-    snap_radius_pct: float = Field(default=0.05, gt=0.0, le=0.30)
-    # When True (default) and no snap target is found, the endpoint
-    # returns 200 with ``clicked: false`` rather than firing a click
-    # at the bare aim. Set False to fall back to a regular click_at.
+    # When True (default) and no snap target is found, returns 200
+    # with clicked=false rather than firing a click at the rect's
+    # centre. Leave on for safe "watch and click only if present".
     require_snap: bool = True
 
 
@@ -1071,48 +1076,52 @@ def create_app(
 
     @app.post("/api/snap-and-click")
     async def snap_and_click(req: SnapAndClickRequest) -> JSONResponse:
-        """Capture a fresh frame, find the snap-able UI element nearest
-        the aim, and click it. No-op if no snap target is within
-        ``snap_radius_pct`` and ``require_snap`` is True.
+        """Capture a fresh frame, find the largest snap-able UI element
+        inside the search rectangle, click it. No-op if no snap target
+        is in the rect and ``require_snap`` is True.
         """
         if runner.is_busy():
             raise HTTPException(409, "a run is currently in progress")
-        from handsneyes.core.vision.dino_snap import find_snap_target
+        from handsneyes.core.vision.dino_snap import find_snap_target_in_rect
+
+        # Normalise the rect: accept either ordering of corners.
+        x0_p = min(req.x0_pct, req.x1_pct)
+        y0_p = min(req.y0_pct, req.y1_pct)
+        x1_p = max(req.x0_pct, req.x1_pct)
+        y1_p = max(req.y0_pct, req.y1_pct)
+        if x1_p - x0_p < 0.005 or y1_p - y0_p < 0.005:
+            raise HTTPException(
+                400, "rectangle too small (min 0.5% in each axis)",
+            )
 
         async with _manual_capture_lock:
             frame_bgr = await _capture_one_frame_bgr()
         if frame_bgr is None:
             raise HTTPException(503, "capture unavailable")
 
-        aim = (req.x_pct, req.y_pct)
-        snap = find_snap_target(
-            frame_bgr, aim,
-            snap_radius_pct=req.snap_radius_pct,
+        snap = find_snap_target_in_rect(
+            frame_bgr, (x0_p, y0_p, x1_p, y1_p),
         )
         if snap is None:
             if req.require_snap:
                 return JSONResponse({
                     "ok": True, "clicked": False,
                     "reason": "no_snap_target",
-                    "aim": [aim[0], aim[1]],
+                    "rect": [x0_p, y0_p, x1_p, y1_p],
                     "snap": None,
                 })
-            click_xy = aim
-            snap_reason = "no_snap_fallback_to_aim"
+            # No-snap fallback: click the centre of the rectangle.
+            click_xy = ((x0_p + x1_p) / 2.0, (y0_p + y1_p) / 2.0)
+            snap_reason = "no_snap_fallback_to_centre"
         else:
             click_xy = snap
             snap_reason = "snap_found"
 
-        # Hand off to the homer via the existing click_at logic. We
-        # build a MouseClickAtRequest and call the route function
-        # directly — same lock, same caching, same kept-warm context.
         click_req = MouseClickAtRequest(
             x_pct=click_xy[0], y_pct=click_xy[1],
             button=req.button, count=req.count,
         )
         click_resp = await mouse_click_at(click_req)
-        # mouse_click_at returns a JSONResponse — peel it back to a
-        # dict so we can attach our snap metadata.
         try:
             import json as _json
             click_body = _json.loads(click_resp.body)
@@ -1121,7 +1130,7 @@ def create_app(
         return JSONResponse({
             "ok": True, "clicked": True,
             "reason": snap_reason,
-            "aim": [aim[0], aim[1]],
+            "rect": [x0_p, y0_p, x1_p, y1_p],
             "snap": [click_xy[0], click_xy[1]],
             "click": click_body,
         })
@@ -3008,10 +3017,10 @@ def create_app(
         try:
             if kind == "snap_and_click":
                 snap_req = SnapAndClickRequest(
-                    x_pct=opts["x_pct"], y_pct=opts["y_pct"],
+                    x0_pct=opts["x0_pct"], y0_pct=opts["y0_pct"],
+                    x1_pct=opts["x1_pct"], y1_pct=opts["y1_pct"],
                     button=opts.get("button", "left"),
                     count=opts.get("count", 1),
-                    snap_radius_pct=opts.get("snap_radius_pct", 0.05),
                     require_snap=True,
                 )
                 resp = await snap_and_click(snap_req)
@@ -3033,11 +3042,15 @@ def create_app(
                         run_id=None,
                     ))
                 else:
+                    rect_dbg = [
+                        opts["x0_pct"], opts["y0_pct"],
+                        opts["x1_pct"], opts["y1_pct"],
+                    ]
                     bus.publish(LogEvent(
                         ts=_time_local.time(), level="DEBUG",
                         source="scheduler",
-                        msg=f"[{job_id}] no snap target near "
-                            f"{[opts['x_pct'], opts['y_pct']]}",
+                        msg=f"[{job_id}] no snap target in rect "
+                            f"{rect_dbg}",
                         run_id=None,
                     ))
                 return
@@ -3084,9 +3097,13 @@ def create_app(
                 raise HTTPException(
                     400, "snap_and_click needs interval_seconds > 0",
                 )
-            if req.x_pct is None or req.y_pct is None:
+            if (
+                req.x0_pct is None or req.y0_pct is None
+                or req.x1_pct is None or req.y1_pct is None
+            ):
                 raise HTTPException(
-                    400, "snap_and_click needs x_pct and y_pct",
+                    400,
+                    "snap_and_click needs x0_pct, y0_pct, x1_pct, y1_pct",
                 )
         else:
             interval_s = (
@@ -3129,9 +3146,10 @@ def create_app(
                 "allow_llm_fallback": req.allow_llm_fallback,
                 "planner": req.planner,
                 "ml_adapter": req.ml_adapter,
-                "x_pct": req.x_pct,
-                "y_pct": req.y_pct,
-                "snap_radius_pct": req.snap_radius_pct,
+                "x0_pct": req.x0_pct,
+                "y0_pct": req.y0_pct,
+                "x1_pct": req.x1_pct,
+                "y1_pct": req.y1_pct,
                 "button": req.button,
                 "count": req.count,
             },
