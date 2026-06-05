@@ -253,6 +253,12 @@ python -m pytest tests/ -v                 # run tests (213 currently passing)
 handsneyes --output-dir PATH ...
 HANDSNEYES_TARGETS_FILE=PATH handsneyes ...
 
+# Click-path knobs (cc env vars)
+HANDSNEYES_OPENLOOP=1                      # use openloop hybrid for click_at (default off; routes ALL clicks through it including no-slam follow-ups)
+HANDSNEYES_DINO_SNAP=1                     # after openloop tail, snap to nearest UI element via saturation finder → DINOv2 multi-seed fallback
+HANDSNEYES_DINO_SNAP_PCT=0.05              # max image-pct distance from aim to snap target (default 5%)
+TERMINALEYES_BT_RECONNECT_INTERVAL_S=20    # Pi-side BT HID reconnect watchdog interval
+
 # Controller
 handsneyes do "click the Run button" --target couch-ubuntu
 handsneyes do "go to reddit.com/r/LocalLLaMA"
@@ -288,9 +294,28 @@ Endpoints (selection):
 | POST | `/api/mouse/click_at` | Body: `{x_pct, y_pct, button, count}`. Drives VisualServoHomer; ~8-12 steps with current model. |
 | POST | `/api/snapshot` | Single fresh webcam frame. `?dedup=1` skips persistence if unchanged. |
 | POST | `/api/sync-text-from-host` | OCRs the focused host text field via `nanonets-ocr-s`. Optional `{x_pct, y_pct, band_pct}` ROI; defaults to last click_at position. |
-| POST | `/api/keyboard/key`, `/text` | Direct HID. Bypass controller. |
+| POST | `/api/keyboard/key`, `/text` | Direct HID. Bypass controller. `text` accepts `{secret: true, append_enter: true}` — secret redacts the dev-side log; append_enter sends Enter after the text (used by the **Type Secret** button). |
+| POST | `/api/keyboard/from-vault` | Type a vault entry's value at the host's focused field. Requires prior `/api/vault/unlock-session`. Value never returned or logged (only length). |
 | POST | `/api/vault/create` | Body: `{passphrase, entry_name, entry_value, overwrite}`. Creates fresh vault file. |
+| POST | `/api/vault/add` | Add an entry to an existing vault (non-destructive). |
+| POST | `/api/snap-and-click` | Body: `{x0_pct, y0_pct, x1_pct, y1_pct, button, count, require_snap}`. Capture → find the largest saturated blob in the rect → click its centroid. `require_snap=true` returns `{clicked: false, reason: "no_snap_target"}` when nothing's there (safe for aggressive watcher cadences). |
+| POST | `/api/scheduler/create` | `kind=intent` (existing, controller agent fires every N minutes) OR `kind=snap_and_click` (rect + `interval_seconds`, fires `/api/snap-and-click` every tick). |
+| POST | `/api/pointer-accel-scale` | `{scale_x, scale_y}` per-axis multiplier on the openloop bulk HID. Persisted to `~/.config/handsneyes/pointer_accel_scale.json` and loaded on startup. UI saves on every input event (350 ms debounce) with a "✓ saved (sx, sy)" inline indicator. |
 | GET | `/api/runs[/{id}[/logs]]` | SSE log stream replays from buffer. |
+
+### Click pipeline (`HANDSNEYES_OPENLOOP=1` is the default for live ops)
+
+Every `/api/mouse/click_at` (and the agent layer's `home_to_pixel`) routes through `VisualServoHomer.home_to_pixel`. When `HANDSNEYES_OPENLOOP=1`, this fires the openloop hybrid path (`_home_to_pixel_openloop`) for ALL clicks — first-of-session AND no-slam follow-ups. The closed-loop ROI servo is kept as a fallback but rarely runs in practice.
+
+**Openloop sequence per click:**
+1. **Calibrate openloop ratio** (once per session) — slam to corner, fire CAL_HID=1000 HID burst, oscillation-variance locate the cursor, ratio = observed_pct / 1000. Persisted to the cc-side ratio cache (`payload[6:8]`) with 5-min TTL so subsequent clicks skip the ~3 s calibration. Calibration itself does NOT see the pointer-accel scale knob — the scale is applied as a post-calibration override layer.
+2. **Position** — slam-to-corner (hotspot at (0,0)) for fresh clicks, OR use `prev_cursor_pct` as start position for no-slam follow-ups (preserves open menus).
+3. **Bulk burst** — chunked HID = `(target - start) / ratio × scale`. `scale` is the UI accel knob (`/api/pointer-accel-scale`), persisted to `~/.config/handsneyes/pointer_accel_scale.json`. Scale = 1.0 trusts calibration verbatim.
+4. **Iterative correction (max 4 iters, tol = 0.4 %)** — pre/post frame-diff localize against the SLAM frame (pre stays pinned to corner for max diff signal), `near_pct=target_aim` disambiguator picks the post-burst blob, residual computed against measured CENTROID minus calibrated `_hotspot_offset_pct` to land the cursor's HOTSPOT (click point) on intent. Each correction burst is clamped to ±400 HID/axis so a mis-localize can't fling the cursor.
+5. **DINO snap (`HANDSNEYES_DINO_SNAP=1`)** — `find_snap_target(frame, target_aim, snap_radius_pct=HANDSNEYES_DINO_SNAP_PCT)` runs ONE saturation-blob finder (HSV `sat≥60` + `val≥90` + MORPH_CLOSE 5×5, finds the centroid of the largest blob in a window around aim) and falls back to DINOv2 multi-seed (every patch as seed, dedup by component, smallest non-background component nearest aim). Both are independent of the homer's possibly-wrong cursor estimate — the search ROI is centred on the OPERATOR's click. If a snap target is found within `snap_radius_pct`, up to 3 unclamped correction bursts drive the cursor to its centroid (re-localize via diff between bursts). Tested: 50-90 px off-button aims still snap to within 2 px of the button's true centre.
+6. **Click** — `_session._executor._mouse.click(button, count=click_count)`. For openloop, `final_cursor_pct` in the sidecar JSON is the measured HOTSPOT position (centroid - offset); for closed-loop it's the centroid.
+
+**Snap-and-click + Watch scheduler:** `POST /api/snap-and-click {x0_pct, y0_pct, x1_pct, y1_pct, button, count, require_snap}` captures a fresh frame, runs `find_snap_target_in_rect` (saturation-only, picks the LARGEST blob in the rect — operator already chose the region, no aim disambiguation needed), and dispatches to `mouse_click_at` if a snap target is found. `require_snap=true` (default) makes it a safe no-op when nothing's there. The scheduler accepts `kind=snap_and_click` with the same rect fields + `interval_seconds` (seconds-granular, vs minutes for intent-kind). Busy-skip semantics preserved: ticks during another op are skipped, cadence anchored to creation time. UI: **Watch & Click…** button arms rect-pick mode (next mousedown/mouseup on the frame draws a rubber-band rectangle, no host click fires); modal lists active watchers with per-job Stop buttons and a redraw… link.
 
 ### Unlock modal (UI)
 
@@ -300,6 +325,12 @@ Click Unlock → modal with three tabs:
 3. **create new vault** — fresh passphrase + confirm + entry name + value. Overwrites any existing vault file. Useful when the master passphrase is forgotten.
 
 Plus a **"Skip visual verify"** checkbox (session-sticky) for when the webcam is fooled (e.g. SMPTE bars from a busy/disconnected camera). All password fields are `type="password"` and wiped on modal close.
+
+The same modal serves **Type Secret** with the title swapped to "Type Secret — supply value", submit relabeled "Type", an `append_enter` checkbox shown, and verify hidden. Operator workflow: click into the host's target input (cc click_at lands the cursor there) → hit Type Secret → modal opens → pick vault entry / direct password → submit. Routes to `/api/vault/unlock-session` + `/api/keyboard/from-vault` (vault tabs) or `/api/keyboard/text {secret:true}` (direct). No controller run, no visual verify, no clicking — pure HID passthrough.
+
+### Watch & Click (snap-and-click scheduler)
+
+Quick-action button next to Unlock / Type Secret. Press it to enter rect-pick mode: frame cursor → crosshair, banner at top, next mousedown→mouseup on the frame draws a rubber-band rectangle and commits it as the watcher search area (no host click fires during the drag). Modal opens with the rect coords + interval (seconds) input + active-watcher list with Stop per row.
 
 ### Passthrough field (host typing)
 
@@ -388,6 +419,19 @@ handsneyes/
 
 This session's work, in commit order on `origin/main`:
 
+- `560442d` — homer/openloop: apply pointer-accel scale to bulk burst + UI auto-save (input event w/ 350ms debounce + inline "✓ saved" indicator; persisted to `~/.config/handsneyes/pointer_accel_scale.json`).
+- `9fa7fdd` — cc: Watch & Click — replace point+radius with drag-to-draw rectangle (new `find_snap_target_in_rect` picks largest blob inside the rect; SnapAndClickRequest takes `x0/y0/x1/y1`).
+- `7ce7e3f` — cc: Watch & Click — armable aim picker (don't fire a real click to set the target).
+- `e3d875d` — cc: `/api/snap-and-click` endpoint + Watch & Click scheduler (`kind=snap_and_click`, seconds-granular cadence).
+- `6d89e99` — dino_snap: saturation-blob fast path (pixel-precise for bright buttons; verified 0-90 px aim offsets all snap within 2 px of true centre).
+- `8f55785` — dino_snap: multi-seed search — find the nearest button when aim is on background.
+- `d75f74a` — homer/openloop: wire DINOv2 snap into openloop tail (rescue for big misses; unclamped correction bursts since visual target is confirmed).
+- `17193b2` — cc: Type Secret button — types a vault entry / direct value at cursor (reuses unlock modal w/ purpose flag).
+- `691aa2a` — homer/openloop: route no-slam follow-up clicks through openloop too (rescues LinkedIn-style "cursor escaped → cruise burst chaos" cases).
+- `fa90fbc` — homer/openloop: iterative correction + hotspot offset for sub-1 % precision.
+- `c0e3ab7` — homer/openloop: post-bulk localize via pre/post frame-diff, not oscillation (oscillation's ±20 HID jitter is below the encoder noise floor on this transport).
+- `b6558c4` — cc: persist openloop ratio across clicks (cache payload[6:8]) + persist pointer-accel scale to disk.
+- `5336c12` / `97d480e` / `09f4dee` — homer: openloop hybrid (calibrate ratio → bulk burst → short correction tail).
 - `b69d7a4` — homer: retrain pointer_accel-yaru-v4. 232 click_at across grid + targeted regions → 2333 rows → hidden=64 model. Canary median 13 → 8.5 steps, max 17 → 13. Added best-val early-stop to trainer + new `collect_targeted.sh` script.
 - `d921f57` — fix: Unlock — clear stale cached vault passphrase on failure. Always show modal; pollRunStatus wipes _vaultPassphraseCache on any failed unlock run.
 - `200fe00` — fix: Unlock modal — "Skip visual verify" override. Threads `verify=False` into login PlanStep through RunRequest → runner → ControllerAgent → LoginAgent.
