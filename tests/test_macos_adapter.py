@@ -42,16 +42,16 @@ class TestAliases:
 class TestRemapCombo:
     def test_ctrl_a_becomes_cmd_a(self) -> None:
         a = MacOSAdapter()
-        assert a.remap_combo(["ctrl"], "a") == (["cmd"], "a")
+        assert a.remap_combo(["ctrl"], "a") == (["meta"], "a")
 
     def test_ctrl_z_becomes_cmd_z(self) -> None:
         a = MacOSAdapter()
-        assert a.remap_combo(["ctrl"], "z") == (["cmd"], "z")
+        assert a.remap_combo(["ctrl"], "z") == (["meta"], "z")
 
     def test_ctrl_uppercase_letter_remapped(self) -> None:
         a = MacOSAdapter()
         # The remap is case-insensitive on the key but preserves it.
-        assert a.remap_combo(["ctrl"], "A") == (["cmd"], "A")
+        assert a.remap_combo(["ctrl"], "A") == (["meta"], "A")
 
     def test_unknown_ctrl_letter_passes_through(self) -> None:
         a = MacOSAdapter()
@@ -83,7 +83,7 @@ class TestOpenApp:
             app=a.canonicalise_app("safari"),
             settle_ms=0,
         )
-        kb.send_key_combo.assert_any_await(["cmd"], "space")
+        kb.send_key_combo.assert_any_await(["meta"], "Space")
         kb.send_text.assert_any_await("Safari")
         kb.send_keystroke.assert_any_await("Enter")
 
@@ -94,14 +94,14 @@ class TestWindowAction:
         a = MacOSAdapter()
         kb = AsyncMock()
         await a.window_action(kb, "fullscreen")
-        kb.send_key_combo.assert_awaited_once_with(["ctrl", "cmd"], "f")
+        kb.send_key_combo.assert_awaited_once_with(["ctrl", "meta"], "f")
 
     @pytest.mark.asyncio
     async def test_close_window_uses_cmd_w(self) -> None:
         a = MacOSAdapter()
         kb = AsyncMock()
         await a.window_action(kb, "close_window")
-        kb.send_key_combo.assert_awaited_once_with(["cmd"], "w")
+        kb.send_key_combo.assert_awaited_once_with(["meta"], "w")
 
     @pytest.mark.asyncio
     async def test_unsupported_intent_raises(self) -> None:

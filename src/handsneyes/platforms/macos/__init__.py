@@ -67,6 +67,12 @@ _APP_ALIASES: dict[str, AppHint] = {
 }
 
 
+# The macOS Command key is the USB HID GUI/Meta modifier. The Pi's BT
+# HID gateway only knows the standard names ("meta"/"super"/"win") and
+# rejects "cmd" with a 400, so every Cmd chord must be sent as "meta".
+_CMD = "meta"
+
+
 # Standard macOS shortcut chord remap: Ctrl-letter on the source
 # semantic chord (the same chord a Linux user types) becomes Cmd-
 # letter on macOS — preserving the *intent* (copy/cut/paste/select-
@@ -126,7 +132,7 @@ class MacOSAdapter(PlatformAdapter):
         except Exception as e:  # noqa: BLE001
             logger.debug("Escape before Spotlight failed: %s", e)
         await asyncio.sleep(0.15)
-        await kb.send_key_combo(["cmd"], "space")
+        await kb.send_key_combo([_CMD], "Space")
         await asyncio.sleep(0.55)
         await kb.send_text(app.canonical)
         await asyncio.sleep(0.45)
@@ -147,7 +153,7 @@ class MacOSAdapter(PlatformAdapter):
         # app. If that wasn't a browser, subsequent attempts try
         # Spotlight by name.
         if attempt == 1:
-            await ctx.keyboard.send_key_combo(["cmd"], "Tab")
+            await ctx.keyboard.send_key_combo([_CMD], "Tab")
             await asyncio.sleep(0.3)
             return "cmd-tab"
         candidates = ("Safari", "Google Chrome", "Firefox")
@@ -169,13 +175,13 @@ class MacOSAdapter(PlatformAdapter):
                 f"macos does not support window intent {intent!r}"
             )
         if intent == "fullscreen":
-            await kb.send_key_combo(["ctrl", "cmd"], "f")
+            await kb.send_key_combo(["ctrl", _CMD], "f")
         elif intent == "close_window":
-            await kb.send_key_combo(["cmd"], "w")
+            await kb.send_key_combo([_CMD], "w")
         elif intent == "next_window":
-            await kb.send_key_combo(["cmd"], "`")
+            await kb.send_key_combo([_CMD], "`")
         elif intent == "minimize":
-            await kb.send_key_combo(["cmd"], "m")
+            await kb.send_key_combo([_CMD], "m")
         elif intent == "show_desktop":
             await kb.send_keystroke("F11")
 
@@ -198,7 +204,7 @@ class MacOSAdapter(PlatformAdapter):
             and len(modifiers) == 1
             and key.lower() in _CTRL_TO_CMD_LETTERS
         ):
-            return (["cmd"], key)
+            return ([_CMD], key)
         return (list(modifiers), key)
 
     def pointer_accel_checkpoint(self) -> Path | None:

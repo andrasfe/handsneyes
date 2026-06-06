@@ -750,14 +750,15 @@ class VisualServoHomer:
         hotspot_offset: bool,
         click: bool,
         run_dir: Path,
+        click_count: int = 1,
     ) -> ClickOutcome:
         """Direct-cursor homing loop. Used when the session has a
         cursor oracle (Quartz on macOS self-capture) instead of relying
         on CV against a captured frame.
 
-        Mirrors ``scripts/canary_macos_direct.py``: pre-burst when the
-        residual exceeds one HID step, then hand to the pointer-accel
-        model for fine adjustment. No slam-to-corner, no HSV / variance
+        Pre-burst when the residual exceeds a few HID steps, then a
+        fine proportional solve that self-calibrates its per-axis gain
+        from the moves it observes. No slam-to-corner, no HSV / variance
         / frame-diff — none of those produce useful signal when the
         cursor isn't in the captured frame to begin with.
         """
@@ -768,20 +769,42 @@ class VisualServoHomer:
         )
         print(f"  Step log: {run_dir}/")
 
-        if hotspot_offset:
-            hx, hy = self._hotspot_offset_pct()
-        else:
-            hx = hy = 0.0
-        target_aim = (x_pct + hx, y_pct + hy)
+        # Quartz CGEventGetLocation reports the cursor HOTSPOT (the real
+        # click point), NOT a CV blob centroid. The webcam path applies
+        # a centroid→hotspot offset because HSV/variance detection
+        # centroids the visible cursor; applying it here would bias
+        # every self-mode click by the offset (~30–180 px). Aim straight
+        # at the operator's pixel. (``hotspot_offset`` is accepted for
+        # signature parity but intentionally ignored on this path.)
+        _ = hotspot_offset
+        target_aim = (x_pct, y_pct)
 
-        # Per-HID gain on macOS at hid=127. Stays in the file so the
-        # canary and the homer don't drift apart — copy if you tune it
-        # somewhere else.
-        PER_HID_PCT = 0.036
+        # Self-capture reads are pixel-exact, so converge far tighter
+        # than the webcam path's ~30 px floor. Default ≈ 0.0012 pct
+        # (~4–5 px on a 3840-wide display); env-tunable for other DPIs.
+        # ~0.0018 pct ≈ 7 px (x) / 4 px (y) on 3840×2160 — at the macOS
+        # relative-HID accel deadzone, below which tiny corrective moves
+        # are swallowed. Chasing tighter just burns iterations against a
+        # hardware floor, so stop there. Env-tunable for other DPIs.
+        TOL = float(os.environ.get("HANDSNEYES_ORACLE_TOL_PCT", "0.0015"))
         BIG_DELTA = 0.05
-        TOL = 0.008          # ≈ 30 px on 3840 — same as the canary
-        MAX_ITERS = 12
-        MAX_BURSTS_PER_ITER = 6
+        MAX_ITERS = int(os.environ.get("HANDSNEYES_ORACLE_MAX_ITERS", "20"))
+        # Two gains, because the HID→pixel ratio is velocity-dependent:
+        #  - cruise_*: pct/HID on the fast move_large path (one
+        #    round-trip, back-to-back chunks at high velocity). Used for
+        #    the gross traverse. Seeded HIGH → first burst undershoots
+        #    (no oscillation), then self-calibrates from the oracle.
+        #  - fine_*: pct/HID on the size-3 chunked path at low velocity.
+        #    A move_large correction computed from the (higher) cruise
+        #    gain rounds to a few HID that accel then swallows, so the
+        #    endgame MUST use the chunked path with its own learned gain.
+        CRUISE_DAMP = 0.85
+        MAX_BURST_HID = 700
+        CRUISE_MIN, CRUISE_MAX = 1e-4, 4e-3
+        cruise_x = cruise_y = 8e-4
+        FINE_DEFAULT = 2.8e-4
+        FINE_MIN, FINE_MAX = 5e-5, 2e-3
+        fine_x = fine_y = FINE_DEFAULT
 
         last_pos: tuple[float, float] | None = None
         for it in range(MAX_ITERS):
@@ -801,53 +824,78 @@ class VisualServoHomer:
                 last_pos = (cx, cy)
                 print(
                     f"  Converged in {it} iter(s); cursor at "
-                    f"({cx:.2%}, {cy:.2%})"
+                    f"({cx:.2%}, {cy:.2%}); residual "
+                    f"({abs(dx_pct):.3%}, {abs(dy_pct):.3%})"
                 )
                 break
 
             if abs(dx_pct) > BIG_DELTA or abs(dy_pct) > BIG_DELTA:
-                # Pre-burst phase: a single int8 HID maxes out at
-                # PER_HID_PCT — single-shot can't cover a large
-                # residual within the iter budget. Burst until close
-                # enough for the model to take over.
-                sign_x = 1 if dx_pct >= 0 else -1
-                sign_y = 1 if dy_pct >= 0 else -1
-                for _ in range(MAX_BURSTS_PER_ITER):
-                    hid_dx_b = sign_x * 127 if abs(dx_pct) > 0.018 else 0
-                    hid_dy_b = sign_y * 127 if abs(dy_pct) > 0.018 else 0
-                    if hid_dx_b == 0 and hid_dy_b == 0:
-                        break
-                    await self._send_hid(hid_dx_b, hid_dy_b)
-                    await asyncio.sleep(0.03)
-                    inner = await self._session.read_cursor_pct()
-                    if inner is None:
-                        break
-                    cx, cy = inner
-                    dx_pct = target_aim[0] - cx
-                    dy_pct = target_aim[1] - cy
-                    if abs(dx_pct) < BIG_DELTA and abs(dy_pct) < BIG_DELTA:
-                        break
-                await asyncio.sleep(0.08)
+                # Gross traverse via the fast bulk path. Damped
+                # proportional sizing biases to undershoot; the exact
+                # oracle delta re-calibrates the cruise gain after every
+                # burst, so even a full-screen jump closes in 2–3 shots.
+                gbx, gby = cx, cy
+                hid_dx = hid_dy = 0
+                if abs(dx_pct) > BIG_DELTA:
+                    hid_dx = max(-MAX_BURST_HID, min(MAX_BURST_HID,
+                        int(round(CRUISE_DAMP * dx_pct / cruise_x))))
+                if abs(dy_pct) > BIG_DELTA:
+                    hid_dy = max(-MAX_BURST_HID, min(MAX_BURST_HID,
+                        int(round(CRUISE_DAMP * dy_pct / cruise_y))))
+                if hid_dx == 0 and hid_dy == 0:
+                    continue
+                await self._send_hid_burst(hid_dx, hid_dy)
+                await asyncio.sleep(0.07)
+                after = await self._session.read_cursor_pct()
+                if after is not None:
+                    ax, ay = after
+                    if abs(hid_dx) >= 30 and (ax - gbx) * hid_dx > 0:
+                        g = abs(ax - gbx) / abs(hid_dx)
+                        if CRUISE_MIN <= g <= CRUISE_MAX:
+                            cruise_x = 0.5 * cruise_x + 0.5 * g
+                    if abs(hid_dy) >= 30 and (ay - gby) * hid_dy > 0:
+                        g = abs(ay - gby) / abs(hid_dy)
+                        if CRUISE_MIN <= g <= CRUISE_MAX:
+                            cruise_y = 0.5 * cruise_y + 0.5 * g
                 continue
 
-            # Refinement: ask the pointer-accel model for the HID that
-            # would land the cursor at the target in one shot.
-            if self._pointer_accel is None:
-                # No model — fall back to a per-axis open-loop ratio
-                # using the established macOS coefficient. Slower
-                # convergence but always terminates.
-                hid_dx = max(-127, min(127, int(dx_pct / 3e-4)))
-                hid_dy = max(-127, min(127, int(dy_pct / 3e-4)))
-            else:
+            # Fine endgame via the chunked path. Prefer the trained
+            # pointer-accel model when loaded (Linux self-capture);
+            # macOS has no model → online-calibrated fine gain.
+            before_x, before_y = cx, cy
+            if self._pointer_accel is not None:
                 hid_dx, hid_dy = self._pointer_accel.inverse(
                     dx_pct, dy_pct, cx, cy,
                 )
                 sx, sy = self._pointer_accel_scale()
-                if sx != 1.0 or sy != 1.0:
-                    hid_dx = int(round(hid_dx * sx))
-                    hid_dy = int(round(hid_dy * sy))
+                hid_dx = max(-127, min(127, int(round(hid_dx * sx))))
+                hid_dy = max(-127, min(127, int(round(hid_dy * sy))))
+            else:
+                hid_dx = int(round(dx_pct / fine_x)) if abs(dx_pct) > TOL else 0
+                hid_dy = int(round(dy_pct / fine_y)) if abs(dy_pct) > TOL else 0
+                hid_dx = max(-127, min(127, hid_dx))
+                hid_dy = max(-127, min(127, hid_dy))
+            # Never stall a sub-step residual that rounds to zero.
+            if hid_dx == 0 and abs(dx_pct) > TOL:
+                hid_dx = 1 if dx_pct > 0 else -1
+            if hid_dy == 0 and abs(dy_pct) > TOL:
+                hid_dy = 1 if dy_pct > 0 else -1
+
             await self._send_hid(int(hid_dx), int(hid_dy))
-            await asyncio.sleep(0.10)
+            await asyncio.sleep(0.06)
+
+            # Online fine-gain update from the chunked move just made.
+            after = await self._session.read_cursor_pct()
+            if after is not None and self._pointer_accel is None:
+                ax, ay = after
+                if abs(hid_dx) >= 3 and (ax - before_x) * hid_dx > 0:
+                    g = abs(ax - before_x) / abs(hid_dx)
+                    if FINE_MIN <= g <= FINE_MAX:
+                        fine_x = 0.5 * fine_x + 0.5 * g
+                if abs(hid_dy) >= 3 and (ay - before_y) * hid_dy > 0:
+                    g = abs(ay - before_y) / abs(hid_dy)
+                    if FINE_MIN <= g <= FINE_MAX:
+                        fine_y = 0.5 * fine_y + 0.5 * g
             last_pos = (cx, cy)
         else:
             final = await self._session.read_cursor_pct()
@@ -865,7 +913,9 @@ class VisualServoHomer:
 
         if click:
             try:
-                await self._session._executor._mouse.click(button)
+                await self._session._executor._mouse.click(
+                    button, count=click_count,
+                )
             except Exception as e:
                 logger.warning("click dispatch failed: %s", e)
                 return ClickOutcome(
@@ -908,6 +958,32 @@ class VisualServoHomer:
         # message threads, animated dashboards) where ROI detection
         # mis-tracks the cursor and the recovery cruise bursts fling
         # it across the screen.
+        # Pixel-exact oracle (Quartz on macOS self-capture) supersedes
+        # BOTH the openloop CV path and the closed-loop servo: the
+        # cursor isn't composited into the captured frame, so every CV
+        # stage (slam, frame-diff, oscillation) would be reading a
+        # cursorless image. When an oracle is wired, prefer it
+        # unconditionally — including under HANDSNEYES_OPENLOOP=1, which
+        # would otherwise shadow it with the (broken-for-self-capture)
+        # openloop path. Dragging keeps the legacy route (the oracle
+        # loop has no drag support).
+        if (
+            getattr(self._session, "cursor_reader", None) is not None
+            and not dragging
+        ):
+            session_out = getattr(self._session, "output_dir", None)
+            ts = datetime.now().strftime("%H%M%S_manual")
+            if session_out is not None:
+                run_dir = session_out / "homer" / ts
+            else:
+                run_dir = PROOF_DIR / ts
+            run_dir.mkdir(parents=True, exist_ok=True)
+            return await self._home_to_pixel_via_oracle(
+                x_pct=x_pct, y_pct=y_pct, button=button,
+                hotspot_offset=hotspot_offset, click=click,
+                run_dir=run_dir, click_count=click_count,
+            )
+
         if (
             os.environ.get("HANDSNEYES_OPENLOOP") == "1"
             and not dragging
