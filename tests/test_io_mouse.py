@@ -106,7 +106,7 @@ class TestClick:
 
         await mouse.click("left")
         mock_client.post.assert_called_once_with(
-            "/bt/mouse/click", json={"button": "left"}
+            "/bt/mouse/click", json={"button": "left", "count": 1}
         )
 
     @pytest.mark.asyncio
@@ -119,7 +119,7 @@ class TestClick:
 
         await mouse.click("right")
         mock_client.post.assert_called_once_with(
-            "/bt/mouse/click", json={"button": "right"}
+            "/bt/mouse/click", json={"button": "right", "count": 1}
         )
 
 

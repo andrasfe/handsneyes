@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from handsneyes.platforms.base import (
     AppHint,
     Capabilities,
+    CursorTemplate,
     LoginHint,
     PlatformAdapter,
     WindowIntent,
@@ -214,6 +215,15 @@ class MacOSAdapter(PlatformAdapter):
     def longjump_checkpoint(self) -> Path | None:
         path = _MODELS_DIR / "longjump"
         return path if (path / "weights.npz").exists() else None
+
+    def cursor_templates(self) -> list[CursorTemplate]:
+        # Stock macOS arrow is identical on every Mac, so synthetic
+        # templates work against an untouched target — no theme setup.
+        from handsneyes.platforms.macos.cursor_templates import (
+            stock_cursor_templates,
+        )
+
+        return stock_cursor_templates()
 
     def login_hint(self) -> LoginHint:
         return LoginHint(

@@ -53,6 +53,7 @@ from handsneyes.core.vision.cursor_finder import (
     find_cursor_hsv_motion,
     find_cursor_hsv_motion_directed,
     find_cursor_hsv_near,
+    find_cursor_template_multiscale,
     setup_instructions,
 )
 from handsneyes.core.vision.ocr_finder import (
@@ -527,6 +528,23 @@ class VisualServoHomer:
         # HID bursts based on this model's prediction before entering
         # the closed-loop servo, cutting typical click time ~2.5x.
         self._longjump = _try_load_longjump_for(platform_adapter)
+        # Shipped synthetic cursor templates (stock-OS cursor rendered
+        # offline — see PlatformAdapter.cursor_templates). On platforms
+        # that ship them (macOS: the arrow is identical on every Mac),
+        # template matching localizes the cursor HOTSPOT pixel-
+        # precisely with zero target-side setup, replacing the
+        # Yaru-calibrated diff centroid + offset estimate.
+        self._stock_templates = None
+        if platform_adapter is not None and hasattr(
+            platform_adapter, "cursor_templates",
+        ):
+            try:
+                self._stock_templates = platform_adapter.cursor_templates()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("cursor_templates() failed: %s", e)
+        # Remember which template scale matched last so subsequent
+        # searches log it (useful when diagnosing webcam-zoom drift).
+        self._stock_template_hint: str | None = None
 
     async def run(self, target_desc: str, button: str = "left") -> ClickOutcome:
         try:
@@ -608,6 +626,19 @@ class VisualServoHomer:
                     f"  HSV candidate at ({cursor_hit.x_pct:.2%},"
                     f"{cursor_hit.y_pct:.2%}) did NOT move when nudged — "
                     f"static red element, ignoring."
+                )
+
+        # Stock-template whole-frame search before the oscillation
+        # fallback: one capture, no jiggle, works on an untouched
+        # target when the platform ships synthetic cursor templates.
+        if cursor_img is None:
+            tpl = self._locate_hotspot_by_template(f0, None, radius_pct=None)
+            if tpl is not None:
+                cursor_img = (tpl[0], tpl[1])
+                print(
+                    f"  Cursor (template {self._stock_template_hint}, "
+                    f"score={tpl[2]:.2f}): ({cursor_img[0]:.2%}, "
+                    f"{cursor_img[1]:.2%})"
                 )
 
         if cursor_img is None:
@@ -1090,6 +1121,21 @@ class VisualServoHomer:
                         "  HSV candidate failed motion verify — falling back."
                     )
 
+            # Stock-template whole-frame search: on platforms that
+            # ship synthetic cursor templates (macOS) this finds the
+            # cursor in one capture — no jiggle, no per-theme setup.
+            if cursor_img is None:
+                tpl = self._locate_hotspot_by_template(
+                    f0, None, radius_pct=None,
+                )
+                if tpl is not None:
+                    cursor_img = (tpl[0], tpl[1])
+                    print(
+                        f"  Cursor (template {self._stock_template_hint}, "
+                        f"score={tpl[2]:.2f}): ({cursor_img[0]:.2%}, "
+                        f"{cursor_img[1]:.2%})"
+                    )
+
         if cursor_img is None:
             print("  Using oscillation-variance to find cursor.")
             osc_hit = await self._find_cursor_via_oscillation(run_dir)
@@ -1427,19 +1473,37 @@ class VisualServoHomer:
 
         last_residual = None
         for it in range(MAX_CORRECTIONS):
-            if pre_bulk is None:
-                break  # no pre-frame to diff against
+            if pre_bulk is None and not self._stock_templates:
+                break  # no pre-frame to diff against, no templates
+            measured = None
+            tpl_hotspot = None
             try:
                 post_bulk = await self._capture_gray()
-                hit = self._detect_cursor_in_roi(
-                    pre_bulk, post_bulk,
-                    (0.0, 0.0, 1.0, 1.0),
-                    near_pct=target_aim,
-                )
-                measured = hit[0] if hit is not None else None
             except Exception:
-                measured = None
-            if measured is None:
+                post_bulk = None
+            if post_bulk is not None and pre_bulk is not None:
+                try:
+                    hit = self._detect_cursor_in_roi(
+                        pre_bulk, post_bulk,
+                        (0.0, 0.0, 1.0, 1.0),
+                        near_pct=target_aim,
+                    )
+                    measured = hit[0] if hit is not None else None
+                except Exception:
+                    measured = None
+            # Stock-template hotspot fix: pixel-precise, independent
+            # of the diff's centroid + offset estimate, and immune to
+            # background animation that poisons the diff. Search
+            # around the diff result when available, else the open-
+            # loop predicted landing point.
+            if post_bulk is not None:
+                tpl_hotspot = self._locate_hotspot_by_template(
+                    post_bulk,
+                    near_pct=(
+                        measured if measured is not None else target_aim
+                    ),
+                )
+            if measured is None and tpl_hotspot is None:
                 # First iteration only: try oscillation as a one-time
                 # fallback (slow — leaves cursor moved — so only do it
                 # when we have no diff signal at all).
@@ -1457,10 +1521,19 @@ class VisualServoHomer:
                     )
                     break
 
-            # Convert measured CENTROID to HOTSPOT position so we
-            # compute the residual against the operator's intended
-            # click point in hotspot-space.
-            hotspot_pct = (measured[0] - hot_x, measured[1] - hot_y)
+            if tpl_hotspot is not None:
+                # Template hit IS the hotspot — no offset conversion.
+                hotspot_pct = (tpl_hotspot[0], tpl_hotspot[1])
+                print(
+                    f"  Iter {it}: template hit "
+                    f"({self._stock_template_hint}, "
+                    f"score={tpl_hotspot[2]:.2f})"
+                )
+            else:
+                # Convert measured CENTROID to HOTSPOT position so we
+                # compute the residual against the operator's intended
+                # click point in hotspot-space.
+                hotspot_pct = (measured[0] - hot_x, measured[1] - hot_y)
             cursor_img = hotspot_pct
             dx_pct = target_aim[0] - hotspot_pct[0]
             dy_pct = target_aim[1] - hotspot_pct[1]
@@ -2078,6 +2151,57 @@ class VisualServoHomer:
         return cursor_img, ratio_x, ratio_y
 
 
+    def _locate_hotspot_by_template(
+        self,
+        frame: np.ndarray,
+        near_pct: tuple[float, float] | None,
+        *,
+        radius_pct: float | None = 0.12,
+    ) -> tuple[float, float, float] | None:
+        """Locate the cursor HOTSPOT via the platform's shipped stock-
+        cursor templates (``PlatformAdapter.cursor_templates``).
+
+        Returns ``(x_pct, y_pct, score)`` or ``None`` when no
+        templates ship for this platform or no match clears the
+        threshold. Pass ``near_pct=None`` (with ``radius_pct=None``)
+        for a whole-frame search — slower, used only for the one-shot
+        initial locate."""
+        if not self._stock_templates:
+            return None
+        try:
+            thr = float(os.environ.get(
+                "HANDSNEYES_CURSOR_TPL_THRESHOLD", "0.40",
+            ))
+            hit = find_cursor_template_multiscale(
+                frame, self._stock_templates,
+                search_center_pct=near_pct,
+                search_radius_pct=radius_pct if near_pct is not None
+                else None,
+                score_threshold=thr,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("template locate failed: %s", e)
+            return None
+        if hit is None:
+            return None
+        self._stock_template_hint = hit.template_name
+        return (hit.x_pct, hit.y_pct, hit.score)
+
+    def _min_diff_blob_area(self) -> int:
+        """Noise floor for frame-diff cursor blobs, in px².
+
+        The historical constant (15) was sized for the 96-px Yaru
+        cursor through a webcam. Platforms that ship stock cursor
+        templates declare their cursor's real footprint — a default
+        macOS arrow can be ~12 px tall in the frame, whose move-diff
+        blob is well under 15 px², so the gate must scale down."""
+        if self._stock_templates:
+            smallest = min(
+                float((t.mask > 0).sum()) for t in self._stock_templates
+            )
+            return max(4, int(smallest * 0.25))
+        return 15
+
     def _detect_cursor_in_roi(
         self,
         pre: np.ndarray, post: np.ndarray,
@@ -2113,14 +2237,31 @@ class VisualServoHomer:
             return None
         pre_roi = pre[ry:ry+rh, rx:rx+rw]
         post_roi = post[ry:ry+rh, rx:rx+rw]
+        min_area = self._min_diff_blob_area()
+        small_cursor = min_area < 15
+        if small_cursor:
+            # A small stock cursor (macOS arrow at ~12-24 px in the
+            # frame) leaves a fainter, fragmented diff than the 96-px
+            # Yaru cursor these defaults were tuned on: binarise
+            # lower, despeckle gently (3×3 OPEN would erase 2-px-wide
+            # arrow strokes), and close harder so fragments merge.
+            diff_thresh = min(diff_thresh, 8)
         diff = cv2.absdiff(pre_roi, post_roi)
         _, mask = cv2.threshold(diff, diff_thresh, 255, cv2.THRESH_BINARY)
-        kernel3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel3)
+        open_side = 2 if small_cursor else 3
+        mask = cv2.morphologyEx(
+            mask, cv2.MORPH_OPEN,
+            cv2.getStructuringElement(
+                cv2.MORPH_RECT, (open_side, open_side),
+            ),
+        )
+        close_side = 7 if small_cursor else 5
         mask = cv2.morphologyEx(
             mask,
             cv2.MORPH_CLOSE,
-            cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
+            cv2.getStructuringElement(
+                cv2.MORPH_RECT, (close_side, close_side),
+            ),
         )
         contours, _ = cv2.findContours(
             mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
@@ -2134,7 +2275,7 @@ class VisualServoHomer:
         candidates = []
         for c in contours:
             a = cv2.contourArea(c)
-            if a < 15:  # noise
+            if a < min_area:  # noise
                 continue
             # Aspect-ratio filter against blinking text-input carets
             # WITHOUT also filtering out the macOS I-beam cursor

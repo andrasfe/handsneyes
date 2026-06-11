@@ -700,6 +700,90 @@ def find_cursor_template(
     return centre_x / w, centre_y / h, float(max_val)
 
 
+@dataclass
+class TemplateHit:
+    """A multiscale template match. ``x_pct``/``y_pct`` is the cursor
+    HOTSPOT (click point), not a centroid — synthetic templates know
+    where their tip is, so no offset calibration applies."""
+
+    x_pct: float
+    y_pct: float
+    score: float
+    template_name: str
+
+
+def find_cursor_template_multiscale(
+    frame: np.ndarray,
+    templates: "list",
+    *,
+    search_center_pct: tuple[float, float] | None = None,
+    search_radius_pct: float | None = None,
+    score_threshold: float = 0.40,
+) -> TemplateHit | None:
+    """Locate a stock-OS cursor via masked NCC over shipped synthetic
+    templates (see ``PlatformAdapter.cursor_templates``).
+
+    Each template is a zero-meaned float32 patch + {0,1} float32 mask
+    with a known hotspot. Zero-meaning makes masked TM_CCORR_NORMED
+    score ~0 on any uniform background patch, so the threshold
+    separates "cursor" from "plain background" cleanly even though
+    the arrow itself is bimodal (black body, white outline).
+
+    ``templates`` is duck-typed: objects with ``.image``, ``.mask``,
+    ``.hotspot_px`` and ``.name`` attributes — core never imports the
+    platforms package.
+    """
+    if frame is None or not templates:
+        return None
+    if frame.ndim == 3:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = frame
+    h, w = gray.shape[:2]
+    gray_f = gray.astype(np.float32)
+
+    if search_center_pct is not None and search_radius_pct is not None:
+        radius = int(round(min(h, w) * float(search_radius_pct)))
+        cx = int(round(float(search_center_pct[0]) * w))
+        cy = int(round(float(search_center_pct[1]) * h))
+        x0 = max(0, cx - radius)
+        y0 = max(0, cy - radius)
+        x1 = min(w, cx + radius)
+        y1 = min(h, cy + radius)
+        roi = gray_f[y0:y1, x0:x1]
+        off_x, off_y = x0, y0
+    else:
+        roi = gray_f
+        off_x = off_y = 0
+
+    best: TemplateHit | None = None
+    for t in templates:
+        timg = t.image
+        tmask = t.mask
+        th, tw = timg.shape[:2]
+        if roi.shape[0] <= th or roi.shape[1] <= tw:
+            continue
+        res = cv2.matchTemplate(
+            roi, timg, cv2.TM_CCORR_NORMED, mask=tmask,
+        )
+        # Masked NCC emits NaN/inf where the image patch is ~uniform
+        # zero (denominator underflow); treat those as "no match".
+        res = np.nan_to_num(res, nan=-1.0, posinf=-1.0, neginf=-1.0)
+        np.clip(res, -1.0, 1.0, out=res)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+        if best is None or max_val > best.score:
+            hx, hy = t.hotspot_px
+            best = TemplateHit(
+                x_pct=(off_x + max_loc[0] + hx) / w,
+                y_pct=(off_y + max_loc[1] + hy) / h,
+                score=float(max_val),
+                template_name=t.name,
+            )
+    if best is None or best.score < score_threshold:
+        return None
+    return best
+
+
 def setup_instructions() -> str:
     """One-shot setup for the target Ubuntu machine's cursor.
 

@@ -54,6 +54,28 @@ class CursorThemeAdvice:
 
 
 @dataclass(frozen=True)
+class CursorTemplate:
+    """A shipped, synthetic image of the OS's stock cursor.
+
+    Lets the vision layer locate the cursor by template matching with
+    ZERO target-side setup — the OS draws the same cursor bitmap on
+    every machine, so the adapter can render it offline and ship it.
+
+    ``image`` is a grayscale float32 patch, zero-meaned over ``mask``
+    (background pixels are 0 and excluded by ``mask``), ready for
+    masked ``cv2.matchTemplate``. ``mask`` is float32 {0, 1} of the
+    same shape. ``hotspot_px`` is the cursor's click point within the
+    patch — matching returns the HOTSPOT position directly, no
+    centroid-to-tip offset calibration needed.
+    """
+
+    name: str
+    image: "object"   # np.ndarray (float32, HxW)
+    mask: "object"    # np.ndarray (float32, HxW)
+    hotspot_px: tuple[float, float]
+
+
+@dataclass(frozen=True)
 class Capabilities:
     """Adapter feature flags. Defaults are pessimistic."""
 
@@ -132,4 +154,12 @@ class PlatformAdapter(ABC):
 
     def login_hint(self) -> LoginHint | None:
         """Hints for VerifyAgent when checking the lockscreen / wake state."""
+        return None
+
+    def cursor_templates(self) -> list[CursorTemplate] | None:
+        """Synthetic templates of the OS's stock cursor, multi-scale.
+
+        Return ``None`` when the platform's cursor is not standardised
+        enough to ship (Linux themes vary per-machine; macOS has
+        exactly one stock arrow)."""
         return None
