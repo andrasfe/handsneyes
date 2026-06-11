@@ -1,8 +1,28 @@
 #!/usr/bin/env bash
 # reconnect.sh — Restore USB ECM + BT HID connectivity after cable change or reboot.
 # Run from the dev Mac. No arguments needed. Guides you through every step.
+#
+# Robustness rules this script follows:
+#   - The :8080/health endpoint is the source of truth for "gateway
+#     up" — NOT the systemd unit name. The Pi may run the gateway as
+#     handsneyes-pi (migrated deploy) or terminaleyes-pi (original
+#     deploy); both are the same code. The unit name is detected,
+#     never assumed.
+#   - No `set -e`: a failing probe is expected (that's why we're
+#     reconnecting) and must be retried/reported, never allowed to
+#     silently kill the script mid-step.
+#   - Pi-side services are managed through systemd only (the units
+#     carry Restart=always) — no ad-hoc setsid/nohup spawns that
+#     systemd can't supervise.
+#   - sudo on the Pi is passwordless for $PI_USER (`sudo -n`). No
+#     passwords are embedded here.
+#
+# Env knobs:
+#   RECONNECT_SKIP_BT=1   stop after the gateway API check (useful
+#                         for scripted/smoke runs; BT needs operator
+#                         action on the target Mac anyway).
 
-set -euo pipefail
+set -uo pipefail
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -25,6 +45,16 @@ PI_IP="10.0.0.2"
 MAC_IP="10.0.0.1"
 PI_USER="andras"
 SSH="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5"
+# Gateway unit name on the Pi — detected in step 3.
+PI_UNIT=""
+
+pi_run() {  # pi_run <command...>  — run on the Pi, never aborts the script
+    $SSH "$PI_USER@$PI_IP" "$@" 2>/dev/null
+}
+
+api_up() {
+    curl -s --connect-timeout 2 "http://$PI_IP:8080/health" > /dev/null 2>&1
+}
 
 check_bt() {
     local health bt
@@ -33,17 +63,53 @@ check_bt() {
     [ "$bt" = "True" ]
 }
 
+detect_unit() {
+    # Sets PI_UNIT to whichever gateway unit exists on the Pi.
+    local u
+    for u in handsneyes-pi terminaleyes-pi; do
+        if pi_run "systemctl cat $u.service > /dev/null 2>&1 && echo yes" | grep -q yes; then
+            PI_UNIT="$u"
+            return 0
+        fi
+    done
+    return 1
+}
+
+restart_gateway() {
+    [ -n "$PI_UNIT" ] || detect_unit || return 1
+    pi_run "sudo -n systemctl restart $PI_UNIT" || return 1
+}
+
+restart_bt_agent() {
+    # bt-agent runs as a systemd unit with Restart=always; restarting
+    # through systemd keeps it supervised (an ad-hoc spawn would die
+    # unnoticed on the next crash).
+    pi_run "sudo -n systemctl restart bt-agent" || true
+}
+
 # ===========================================================================
 # Step 1: Find and configure USB Ethernet interface
 # ===========================================================================
 echo -e "\n${BLUE}=== Step 1: USB Ethernet ===${NC}"
 
+find_iface() {
+    # The Pi's ECM gadget always presents MAC 48:6f:73:74:xx:xx
+    # ("host"). Plain for-loop — a pipeline-into-while here once
+    # aborted the whole script under `set -e` when the last probed
+    # interface didn't match.
+    local i
+    for i in $(ifconfig -l 2>/dev/null); do
+        if ifconfig "$i" 2>/dev/null | grep -q "48:6f:73:74"; then
+            echo "$i"
+            return 0
+        fi
+    done
+    return 1
+}
+
 ATTEMPT=0
 while true; do
-    IFACE=$(ifconfig -l | tr ' ' '\n' | while read if; do
-        ifconfig "$if" 2>/dev/null | grep -q "48:6f:73:74" && echo "$if" && break
-    done)
-
+    IFACE=$(find_iface || true)
     if [ -n "$IFACE" ]; then
         ok "Found interface: $IFACE"
         break
@@ -67,14 +133,18 @@ while true; do
 done
 
 # Configure IP
-CURRENT_IP=$(ifconfig "$IFACE" 2>/dev/null | grep "inet " | awk '{print $2}')
+CURRENT_IP=$(ifconfig "$IFACE" 2>/dev/null | grep "inet " | awk '{print $2}' || true)
 if [ "$CURRENT_IP" = "$MAC_IP" ]; then
     ok "IP already set: $MAC_IP"
 else
     info "Setting $IFACE to $MAC_IP ..."
-    sudo ifconfig "$IFACE" "$MAC_IP" netmask 255.255.255.0 up
-    sleep 1
-    ok "IP configured: $MAC_IP on $IFACE"
+    if sudo ifconfig "$IFACE" "$MAC_IP" netmask 255.255.255.0 up; then
+        sleep 1
+        ok "IP configured: $MAC_IP on $IFACE"
+    else
+        fail "Could not configure $IFACE — check sudo rights and rerun."
+        exit 1
+    fi
 fi
 
 # ===========================================================================
@@ -114,53 +184,58 @@ while true; do
 done
 
 # ===========================================================================
-# Step 3: Check services on Pi
+# Step 3: HID gateway API (health-first)
 # ===========================================================================
-echo -e "\n${BLUE}=== Step 3: Pi services ===${NC}"
+echo -e "\n${BLUE}=== Step 3: HID gateway ===${NC}"
 
-# Check / start handsneyes-pi
-if $SSH "$PI_USER@$PI_IP" "pgrep -f handsneyes-pi" > /dev/null 2>&1; then
-    ok "handsneyes-pi running"
+if api_up; then
+    ok "Gateway API responding at http://$PI_IP:8080"
+    detect_unit || true
+    [ -n "$PI_UNIT" ] && ok "Gateway unit: $PI_UNIT"
 else
-    info "Starting handsneyes-pi ..."
-    $SSH "$PI_USER@$PI_IP" "echo 'andras' | sudo -S systemctl start handsneyes-pi" 2>/dev/null || true
-    sleep 5
-    if $SSH "$PI_USER@$PI_IP" "pgrep -f handsneyes-pi" > /dev/null 2>&1; then
-        ok "handsneyes-pi started"
-    else
-        fail "Could not start handsneyes-pi"
-        echo "  Check logs: ssh $PI_USER@$PI_IP 'sudo journalctl -u handsneyes-pi --since \"5 min ago\"'"
+    info "API not responding — locating gateway unit ..."
+    if ! detect_unit; then
+        fail "No gateway unit found on the Pi (tried handsneyes-pi, terminaleyes-pi)."
+        echo "  The Pi-side service was never installed (or SSH/sudo is broken)."
+        echo "  Inspect: $SSH $PI_USER@$PI_IP 'systemctl list-units --type=service'"
         exit 1
+    fi
+    info "Starting $PI_UNIT ..."
+    restart_gateway || warn "systemctl restart $PI_UNIT failed — will keep polling the API anyway"
+
+    info "Waiting for API ..."
+    TRIES=0
+    while ! api_up; do
+        TRIES=$((TRIES + 1))
+        if [ "$TRIES" -ge 15 ]; then
+            fail "API not responding after 30s"
+            echo "  Logs: $SSH $PI_USER@$PI_IP 'sudo -n journalctl -u $PI_UNIT -n 50 --no-pager'"
+            exit 1
+        fi
+        sleep 2
+    done
+    ok "Gateway API responding"
+fi
+
+# Pairing agent (systemd unit bt-agent, Restart=always)
+if pi_run "pgrep -f bt-agent.py" > /dev/null; then
+    ok "Pairing agent running"
+else
+    info "Starting pairing agent (systemctl restart bt-agent) ..."
+    restart_bt_agent
+    sleep 3
+    if pi_run "pgrep -f bt-agent.py" > /dev/null; then
+        ok "Pairing agent started"
+    else
+        warn "Pairing agent not running — pairing may hang"
+        echo "  Logs: $SSH $PI_USER@$PI_IP 'sudo -n journalctl -u bt-agent -n 30 --no-pager'"
     fi
 fi
 
-# Wait for REST API
-info "Waiting for REST API ..."
-TRIES=0
-while ! curl -s --connect-timeout 2 "http://$PI_IP:8080/health" > /dev/null 2>&1; do
-    TRIES=$((TRIES + 1))
-    if [ "$TRIES" -ge 15 ]; then
-        fail "REST API not responding after 30s"
-        echo "  Try restarting: ssh $PI_USER@$PI_IP 'sudo systemctl restart handsneyes-pi'"
-        exit 1
-    fi
-    sleep 2
-done
-ok "REST API responding"
-
-# Check / start pairing agent
-if $SSH "$PI_USER@$PI_IP" "pgrep -f bt-agent.py" > /dev/null 2>&1; then
-    ok "Pairing agent running"
-else
-    info "Starting pairing agent ..."
-    $SSH "$PI_USER@$PI_IP" "echo 'andras' | sudo -S bash -c 'PYTHONUNBUFFERED=1 setsid python3 /home/andras/handsneyes/scripts/bt-agent.py > /tmp/bt-agent.log 2>&1 < /dev/null &'" 2>/dev/null || true
-    sleep 3
-    if $SSH "$PI_USER@$PI_IP" "pgrep -f bt-agent.py" > /dev/null 2>&1; then
-        ok "Pairing agent started"
-    else
-        warn "Pairing agent failed to start — pairing may hang"
-        echo "  Try manually: ssh $PI_USER@$PI_IP 'sudo python3 ~/handsneyes/scripts/bt-agent.py'"
-    fi
+if [ "${RECONNECT_SKIP_BT:-}" = "1" ]; then
+    echo ""
+    ok "RECONNECT_SKIP_BT=1 — stopping after gateway check."
+    exit 0
 fi
 
 # ===========================================================================
@@ -178,7 +253,8 @@ else
         if [ "$ATTEMPT" -le 1 ]; then
             warn "BT HID not connected"
             echo ""
-            echo "  On the TARGET Mac:"
+            echo "  macOS will NOT auto-open the HID channel from the Pi side —"
+            echo "  the target Mac must initiate. On the TARGET Mac:"
             echo "    1. Open System Settings → Bluetooth"
             echo "    2. Look for 'devmouse' or 'keyboarder' in Nearby Devices"
             echo "    3. Click Connect"
@@ -191,12 +267,12 @@ else
             echo "       click Forget This Device, then reconnect"
             echo "    2. If device doesn't appear, toggle Bluetooth off and on"
         elif [ "$ATTEMPT" -le 3 ]; then
-            warn "Still not connected — restarting BT on Pi"
+            warn "Still not connected — restarting BT stack on Pi"
             echo ""
-            $SSH "$PI_USER@$PI_IP" "echo 'andras' | sudo -S bash -c 'systemctl restart bluetooth; sleep 2; hciconfig hci0 up; hciconfig hci0 class 0x0025C0; hciconfig hci0 piscan; systemctl restart handsneyes-pi'" 2>/dev/null || true
+            pi_run "sudo -n bash -c 'systemctl restart bluetooth; sleep 2; hciconfig hci0 up; hciconfig hci0 class 0x0025C0; hciconfig hci0 piscan'" || true
+            restart_gateway || true
             sleep 5
-            # Restart agent (bluetooth restart kills it)
-            $SSH "$PI_USER@$PI_IP" "echo 'andras' | sudo -S bash -c 'pkill -f bt-agent.py 2>/dev/null; sleep 1; PYTHONUNBUFFERED=1 setsid python3 /home/andras/handsneyes/scripts/bt-agent.py > /tmp/bt-agent.log 2>&1 < /dev/null &'" 2>/dev/null || true
+            restart_bt_agent
             sleep 3
             echo "  Bluetooth restarted on Pi."
             echo "  On the TARGET Mac:"
@@ -207,19 +283,19 @@ else
             warn "Still not connected — clean slate"
             echo ""
             echo "  Removing all pairings on Pi and doing full reset..."
-            $SSH "$PI_USER@$PI_IP" "echo 'andras' | sudo -S bash -c '
-                for dev in \$(echo \"devices\" | bluetoothctl 2>/dev/null | grep Device | awk \"{print \\\$2}\"); do
-                    echo \"remove \$dev\" | bluetoothctl 2>/dev/null
+            pi_run "sudo -n bash -c '
+                for dev in \$(bluetoothctl devices 2>/dev/null | awk \"{print \\\$2}\"); do
+                    bluetoothctl remove \"\$dev\" > /dev/null 2>&1
                 done
                 systemctl restart bluetooth
                 sleep 2
                 hciconfig hci0 up
                 hciconfig hci0 class 0x0025C0
                 hciconfig hci0 piscan
-                systemctl restart handsneyes-pi
-            '" 2>/dev/null || true
+            '" || true
+            restart_gateway || true
             sleep 5
-            $SSH "$PI_USER@$PI_IP" "echo 'andras' | sudo -S bash -c 'pkill -f bt-agent.py 2>/dev/null; sleep 1; PYTHONUNBUFFERED=1 setsid python3 /home/andras/handsneyes/scripts/bt-agent.py > /tmp/bt-agent.log 2>&1 < /dev/null &'" 2>/dev/null || true
+            restart_bt_agent
             sleep 3
             echo "  Full reset done."
             echo "  On the TARGET Mac:"
@@ -252,8 +328,6 @@ fi
 # ===========================================================================
 echo -e "\n${BLUE}=== Step 5: Verification ===${NC}"
 
-HEALTH=$(curl -s "http://$PI_IP:8080/health" 2>/dev/null)
-
 # Test keyboard
 RESULT=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H 'Content-Type: application/json' \
     -d '{"key":"a"}' "http://$PI_IP:8080/bt/keystroke" 2>/dev/null || echo "000")
@@ -278,7 +352,7 @@ fi
 echo -e "\n${GREEN}=== All good ===${NC}"
 echo ""
 echo "  USB Ethernet:  $IFACE @ $MAC_IP -> $PI_IP"
-echo "  REST API:      http://$PI_IP:8080"
+echo "  REST API:      http://$PI_IP:8080  (unit: ${PI_UNIT:-unknown})"
 echo "  BT HID:        connected"
 echo ""
 echo "  Test:  curl -X POST -H 'Content-Type: application/json' -d '{\"text\":\"hello\"}' http://$PI_IP:8080/bt/text"
