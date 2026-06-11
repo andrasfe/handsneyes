@@ -784,6 +784,68 @@ def find_cursor_template_multiscale(
     return best
 
 
+def measure_hover_feedback(
+    on1: np.ndarray,
+    off: np.ndarray,
+    on2: np.ndarray,
+    *,
+    target_pct: tuple[float, float],
+    roi_half_pct: float = 0.07,
+    cursor_footprint_px: float = 600.0,
+    diff_thresh: int = 10,
+    max_noise_fraction: float = 0.30,
+) -> bool | None:
+    """Decide whether the widget under ``target_pct`` gave hover
+    feedback when the cursor wiggled off it and back.
+
+    Inputs are three grayscale frames: cursor ON target, cursor OFF
+    (wiggled away, still near), cursor back ON. Desktop UIs highlight
+    interactive widgets under the pointer; the highlight repaints the
+    whole widget (hundreds-thousands of px), while the cursor's own
+    enter/leave contributes only ~2× its footprint to the diff. So:
+
+      signal  = min(changed(on1, off), changed(off, on2))
+                (the highlight must toggle BOTH ways — robust to a
+                one-off background repaint in a single interval)
+      noise   = changed(on1, on2)
+                (both "on" frames — should be near-identical)
+      hover   = signal > max(2 × noise, noise + 2.5 × cursor_px)
+
+    Returns ``True`` (feedback seen — the cursor is provably on an
+    interactive element), ``False`` (no feedback — informational
+    only, many real targets don't highlight), or ``None`` when the
+    region is animating too much to measure.
+    """
+    if not (on1.shape == off.shape == on2.shape) or on1.ndim != 2:
+        return None
+    h, w = on1.shape[:2]
+    x0 = max(0, int((target_pct[0] - roi_half_pct) * w))
+    y0 = max(0, int((target_pct[1] - roi_half_pct) * h))
+    x1 = min(w, int((target_pct[0] + roi_half_pct) * w))
+    y1 = min(h, int((target_pct[1] + roi_half_pct) * h))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return None
+
+    kernel2 = np.ones((2, 2), np.uint8)
+
+    def _changed(a: np.ndarray, b: np.ndarray) -> int:
+        d = cv2.absdiff(a[y0:y1, x0:x1], b[y0:y1, x0:x1])
+        m = (d > diff_thresh).astype(np.uint8)
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, kernel2)
+        return int(m.sum())
+
+    d_out = _changed(on1, off)
+    d_back = _changed(off, on2)
+    d_noise = _changed(on1, on2)
+    roi_area = (x1 - x0) * (y1 - y0)
+    if d_noise > roi_area * max_noise_fraction:
+        return None  # video / animation in the region — unmeasurable
+    signal = min(d_out, d_back)
+    return signal > max(
+        2.0 * d_noise, d_noise + 2.5 * cursor_footprint_px,
+    )
+
+
 def setup_instructions() -> str:
     """One-shot setup for the target Ubuntu machine's cursor.
 

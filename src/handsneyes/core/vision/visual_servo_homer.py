@@ -54,6 +54,7 @@ from handsneyes.core.vision.cursor_finder import (
     find_cursor_hsv_motion_directed,
     find_cursor_hsv_near,
     find_cursor_template_multiscale,
+    measure_hover_feedback,
     setup_instructions,
 )
 from handsneyes.core.vision.ocr_finder import (
@@ -419,6 +420,12 @@ class ClickOutcome:
     # callers can compare "where I aimed" vs "where homer said the
     # cursor landed" without re-parsing history.
     final_cursor_pct: tuple[float, float] | None = None
+    # Hover-feedback confirmation (HANDSNEYES_HOVER_CONFIRM=1): True
+    # = the target region visibly reacted to the cursor wiggling off
+    # and back (we're provably on an interactive element), False =
+    # no reaction (informational — many targets don't highlight),
+    # None = not run or unmeasurable (region animating).
+    hover_feedback: bool | None = None
 
 
 class VisualServoHomer:
@@ -1686,6 +1693,29 @@ class VisualServoHomer:
             except Exception as e:
                 print(f"  Dino skipped: {e}")
 
+        # 5c. Hover-feedback confirmation (opt-in,
+        #     HANDSNEYES_HOVER_CONFIRM=1). Costs ~0.8 s and two HID
+        #     wiggles; never blocks the click — a False is recorded
+        #     on the outcome for the operator/agent to weigh (many
+        #     legitimate targets simply don't highlight on hover).
+        hover_feedback: bool | None = None
+        if click and os.environ.get("HANDSNEYES_HOVER_CONFIRM") == "1":
+            hover_feedback = await self._hover_feedback_check(
+                target_aim, rx, ry, run_dir,
+            )
+            if hover_feedback is True:
+                print(
+                    "  Hover-confirm: widget reacted — cursor is on "
+                    "an interactive element"
+                )
+            elif hover_feedback is False:
+                print(
+                    "  Hover-confirm: no reaction in target region "
+                    "(informational; target may not highlight)"
+                )
+            else:
+                print("  Hover-confirm: unmeasurable (region animating)")
+
         # 5. Click.
         if click:
             try:
@@ -1713,6 +1743,7 @@ class VisualServoHomer:
             reason="openloop_hybrid",
             proof_path=proof, history=[],
             final_cursor_pct=cursor_img,
+            hover_feedback=hover_feedback,
         )
 
     async def drag_to_pixels(
@@ -2186,6 +2217,66 @@ class VisualServoHomer:
             return None
         self._stock_template_hint = hit.template_name
         return (hit.x_pct, hit.y_pct, hit.score)
+
+    def _cursor_footprint_px(self, frame_shape: tuple) -> float:
+        """Best estimate of the cursor's on-frame pixel area."""
+        if self._cursor_area_pct:
+            h, w = frame_shape[:2]
+            return float(self._cursor_area_pct) * h * w
+        if self._stock_templates:
+            areas = sorted(
+                float((t.mask > 0).sum()) for t in self._stock_templates
+            )
+            return areas[len(areas) // 2]
+        return 600.0  # ~Yaru-96 footprint on a 1080p webcam
+
+    async def _hover_feedback_check(
+        self,
+        target_aim: tuple[float, float],
+        rx: float, ry: float,
+        run_dir: Path,
+    ) -> bool | None:
+        """Wiggle the cursor off the target and back, and diff the
+        TARGET region across the three states. A hover highlight
+        repaints the whole widget; the cursor's own enter/leave
+        contributes only ~2× its footprint — so an elevated diff
+        proves the cursor sits on an interactive element WITHOUT
+        ever locating the cursor itself. The wiggle is exactly
+        reversed (same integer HID back) so the cursor returns to
+        its pre-check position."""
+        OFF_PCT = 0.05
+        SETTLE = 0.30
+        # Wiggle toward screen centre: stays on-screen, and reliably
+        # leaves the widget for edge-of-screen targets.
+        dir_x = 1.0 if target_aim[0] < 0.5 else -1.0
+        dir_y = 1.0 if target_aim[1] < 0.5 else -1.0
+        hid_dx = int(dir_x * OFF_PCT / rx)
+        hid_dy = int(dir_y * OFF_PCT / ry)
+        if hid_dx == 0 and hid_dy == 0:
+            return None
+        try:
+            on1 = await self._capture_gray()
+            await self._send_hid(hid_dx, hid_dy)
+            await asyncio.sleep(SETTLE)
+            off = await self._capture_gray()
+            await self._send_hid(-hid_dx, -hid_dy)
+            await asyncio.sleep(SETTLE)
+            on2 = await self._capture_gray()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("hover check capture failed: %s", e)
+            return None
+        result = measure_hover_feedback(
+            on1, off, on2,
+            target_pct=target_aim,
+            cursor_footprint_px=self._cursor_footprint_px(on1.shape),
+        )
+        try:
+            cv2.imwrite(str(run_dir / "hover_on1.png"), on1)
+            cv2.imwrite(str(run_dir / "hover_off.png"), off)
+            cv2.imwrite(str(run_dir / "hover_on2.png"), on2)
+        except Exception:
+            pass
+        return result
 
     def _min_diff_blob_area(self) -> int:
         """Noise floor for frame-diff cursor blobs, in px².

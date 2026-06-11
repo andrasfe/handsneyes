@@ -92,6 +92,15 @@ def render_arrow_template(height_px: int) -> CursorTemplate:
     )
 
 
+# NOTE: an I-beam template ladder was prototyped and removed after
+# live validation against a real remote-Mac HDMI frame: glyph-like
+# shapes false-positive on terminal text ('|', quotes) in whole-
+# frame searches, and the synthetic render never beat the arrow
+# template even at the true I-beam position (0.32 vs 0.44, with a
+# 9 px position bias). The arrow template empirically matches the
+# real I-beam well enough to localize it. Don't re-add without
+# validating against real frames first.
+
 _CACHE: list[CursorTemplate] | None = None
 
 
