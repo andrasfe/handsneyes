@@ -53,6 +53,12 @@ class Target:
     #   the cc (self-driving setup). camera_index is then the
     #   display index (0 = primary).
     capture_source: str = "webcam"
+    # Perspective-rectify webcam frames: detect the screen's
+    # quadrilateral once per session and warp every frame to true
+    # screen space. Off by default — pct-space changes shift the
+    # input distribution of pointer-accel models trained on raw
+    # frames (retrain before enabling on a tuned linux target).
+    rectify: bool = False
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -138,6 +144,7 @@ class TargetRegistry:
                 screen_size=(int(screen[0]), int(screen[1])),
                 description=str(row.get("description", "")),
                 capture_source=str(row.get("capture_source", "webcam")),
+                rectify=bool(row.get("rectify", False)),
             )
         return cls(targets=targets, source=path)
 

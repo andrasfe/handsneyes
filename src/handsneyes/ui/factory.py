@@ -27,6 +27,7 @@ to run records: ``<watch_dir>/<run_id>/0001_..._navigate_check.png``.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -121,10 +122,23 @@ def make_target_context_factory(
                 capture = ScreenCapture(display_index=target.camera_index)
             else:
                 capture = WebcamCapture(device_index=target.camera_index)
+                if target.rectify or os.environ.get(
+                    "HANDSNEYES_RECTIFY",
+                ) == "1":
+                    from handsneyes.core.capture.rectified import (
+                        RectifiedCapture,
+                    )
+                    capture = RectifiedCapture(
+                        capture,
+                        aspect_hint=target.screen_size,
+                        cache_path=Path.home() / ".config" / "handsneyes"
+                        / f"rectify_{target.name}.json",
+                    )
             # Hard cap: cv2.VideoCapture(N) on macOS can block forever
             # when N points at a busy / phantom device. 10s is generous
             # for a real USB webcam (the warmup loop also runs here).
             # ScreenCapture.open() is a single grab — well under 10s.
+            # RectifiedCapture adds one extra calibration grab.
             await _asyncio.wait_for(capture.open(), timeout=10.0)
         except _asyncio.TimeoutError:
             logger.warning(
