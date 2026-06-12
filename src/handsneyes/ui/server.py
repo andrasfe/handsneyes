@@ -337,6 +337,55 @@ def _sse(event: str | None, data: Any) -> bytes:
     return ("\n".join(out)).encode()
 
 
+def _homer_calibration_path(target_name: str) -> Path:
+    import re
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", target_name) or "default"
+    return (
+        Path.home() / ".config" / "handsneyes"
+        / f"homer_calibration_{safe}.json"
+    )
+
+
+# A calibration is host-hardware-specific (pointer-accel curve,
+# capture geometry) but stable over weeks. The correction loop +
+# wedge detection absorb moderate drift, so a stale-ish ratio is
+# strictly better than re-paying the calibration slam every session.
+_HOMER_CALIBRATION_MAX_AGE_S = 30 * 86400
+
+
+def _load_homer_calibration(target_name: str) -> tuple | None:
+    import time
+    try:
+        d = json.loads(
+            _homer_calibration_path(target_name).read_text("utf-8"),
+        )
+        if time.time() - float(d["ts"]) > _HOMER_CALIBRATION_MAX_AGE_S:
+            return None
+        payload = tuple(float(v) for v in d["payload"])
+        return payload if len(payload) >= 4 else None
+    except Exception:
+        return None
+
+
+def _save_homer_calibration(target_name: str, payload: tuple) -> None:
+    import time
+    try:
+        path = _homer_calibration_path(target_name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "target": target_name,
+                    "ts": time.time(),
+                    "payload": list(payload),
+                },
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        logger.debug("homer calibration save failed", exc_info=True)
+
+
 def create_app(
     context_factory: ContextFactory,
     *,
@@ -345,6 +394,7 @@ def create_app(
     settings: Any = None,
     active_platform: str = "linux_gnome",
     runtime_state: dict | None = None,
+    target_name: str = "default",
 ) -> FastAPI:
     """Build the FastAPI app.
 
@@ -1198,34 +1248,44 @@ def create_app(
                 # DEFAULT seed) on every subsequent click within
                 # the session.
                 cached_ratio = app.state.last_homer_ratio_at
+                payload = None
                 if cached_ratio is not None:
-                    payload, rt = cached_ratio
+                    p, rt = cached_ratio
                     if _time.time() - rt < RATIO_CACHE_TTL_S:
-                        # Backwards-compatible unpack — the payload
-                        # has grown across versions:
-                        #   payload[0:4] = closed-loop x,y + fast x,y
-                        #   payload[4:6] = optional hotspot (x, y)
-                        #   payload[6:8] = optional openloop x, y
-                        rx, ry, fx, fy = payload[:4]
-                        homer._pct_per_hid_x = rx
-                        homer._pct_per_hid_y = ry
-                        homer._pct_per_hid_fast_x = fx
-                        homer._pct_per_hid_fast_y = fy
-                        if len(payload) >= 6:
-                            homer._calibrated_hotspot_offset = (
-                                payload[4], payload[5],
-                            )
-                        if len(payload) >= 8:
-                            # Openloop ratio is calibrated against
-                            # the full-bulk send pattern (~1000 HID
-                            # sustained chunked stream). It doesn't
-                            # extrapolate cleanly from the servo's
-                            # small-step ratio, so we cache it
-                            # separately. Loading it here lets the
-                            # 2nd-and-later openloop clicks skip
-                            # the ~3 s calibration burst entirely.
-                            homer._pct_per_hid_openloop_x = payload[6]
-                            homer._pct_per_hid_openloop_y = payload[7]
+                        payload = p
+                if payload is None:
+                    # Cross-session fallback: the calibration is
+                    # host-hardware-specific and stable for weeks, so
+                    # a fresh cc session reuses the per-target file
+                    # instead of re-paying the ~3 s calibration slam
+                    # on its first click.
+                    payload = _load_homer_calibration(target_name)
+                if payload is not None:
+                    # Backwards-compatible unpack — the payload
+                    # has grown across versions:
+                    #   payload[0:4] = closed-loop x,y + fast x,y
+                    #   payload[4:6] = optional hotspot (x, y)
+                    #   payload[6:8] = optional openloop x, y
+                    rx, ry, fx, fy = payload[:4]
+                    homer._pct_per_hid_x = rx
+                    homer._pct_per_hid_y = ry
+                    homer._pct_per_hid_fast_x = fx
+                    homer._pct_per_hid_fast_y = fy
+                    if len(payload) >= 6:
+                        homer._calibrated_hotspot_offset = (
+                            payload[4], payload[5],
+                        )
+                    if len(payload) >= 8:
+                        # Openloop ratio is calibrated against
+                        # the full-bulk send pattern (~1000 HID
+                        # sustained chunked stream). It doesn't
+                        # extrapolate cleanly from the servo's
+                        # small-step ratio, so we cache it
+                        # separately. Loading it here lets the
+                        # 2nd-and-later openloop clicks skip
+                        # the ~3 s calibration burst entirely.
+                        homer._pct_per_hid_openloop_x = payload[6]
+                        homer._pct_per_hid_openloop_y = payload[7]
                 outcome = await homer.home_to_pixel(
                     req.x_pct, req.y_pct, button=req.button,
                     prev_cursor_pct=prev_cursor_pct,
@@ -1270,6 +1330,10 @@ def create_app(
                     app.state.last_homer_ratio_at = (
                         payload, _time.time(),
                     )
+                    # Cross-session persistence: the same payload,
+                    # keyed by target. The next cc session's first
+                    # click starts already-calibrated.
+                    _save_homer_calibration(target_name, payload)
                     # Every successful click produced a fresh
                     # history.jsonl trajectory — a new training row
                     # for the homer's retrain pipeline.

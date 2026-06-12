@@ -425,6 +425,7 @@ def _cmd_commandcenter(args: argparse.Namespace) -> int:
         settings=_Settings(),
         active_platform=target.platform,
         runtime_state=runtime_state,
+        target_name=target.name,
     )
 
     print(
