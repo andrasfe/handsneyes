@@ -3214,10 +3214,69 @@ async function loadChatHistory() {
 })();
 
 // ── boot ───────────────────────────────────────────────────────
+// ── multi-target switcher ────────────────────────────────────────
+// Populated from /api/targets. Switching POSTs /api/target — the
+// server flips the active context factory; the multi-host BT
+// gateway keeps every machine connected, so the switch is instant
+// and the de-selected computers receive no further HID.
+const $optTarget = document.getElementById("opt-target");
+
+async function loadTargets() {
+  if (!$optTarget) return;
+  try {
+    const r = await fetch("/api/targets");
+    if (!r.ok) return;
+    const data = await r.json();
+    $optTarget.innerHTML = "";
+    for (const t of data.targets || []) {
+      const opt = document.createElement("option");
+      opt.value = t.name;
+      opt.textContent = `🖥 ${t.name}`;
+      opt.title = t.description || t.name;
+      if (t.name === data.active) opt.selected = true;
+      $optTarget.appendChild(opt);
+    }
+  } catch (e) {
+    appendSystemLog("ERROR", `targets list failed: ${e}`);
+  }
+}
+
+if ($optTarget) {
+  $optTarget.addEventListener("change", async () => {
+    const name = $optTarget.value;
+    try {
+      const r = await fetch("/api/target", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        appendSystemLog(
+          "ERROR",
+          `target switch failed: ${data.detail || r.status}`,
+        );
+        await loadTargets(); // re-sync selection
+        return;
+      }
+      // Follow the target's OS so keyboard remap stays correct.
+      if ($optPlatform && data.platform) {
+        $optPlatform.value = data.platform === "macos" ? "macos" : "linux";
+      }
+      appendSystemLog("INFO", `target → ${data.active}`);
+      // Show the new computer's screen right away.
+      fetch("/api/snapshot", { method: "POST" }).catch(() => {});
+    } catch (e) {
+      appendSystemLog("ERROR", `target switch error: ${e}`);
+    }
+  });
+}
+
 async function init() {
   await loadChatHistory();
   await refreshKnownIds();
   connectGlobalLogs();
+  await loadTargets();
   pollLatest();
   // Periodic re-list to catch ring-buffer evictions / deep history.
   // 30 s is enough: pollLatest()'s long-poll already pushes new

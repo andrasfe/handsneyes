@@ -244,6 +244,21 @@ class BtHidError(Exception):
     """Raised when Bluetooth HID operations fail."""
 
 
+class _HidClient:
+    """One connected host: its socket pair + per-host input state."""
+
+    __slots__ = ("mac", "ctrl", "intr", "mouse_buttons", "control_task")
+
+    def __init__(
+        self, mac: str, ctrl: socket.socket, intr: socket.socket,
+    ) -> None:
+        self.mac = mac
+        self.ctrl = ctrl
+        self.intr = intr
+        self.mouse_buttons: int = 0
+        self.control_task: asyncio.Task[None] | None = None
+
+
 def _clamp(value: int, minimum: int = -127, maximum: int = 127) -> int:
     return max(minimum, min(maximum, value))
 
@@ -270,14 +285,19 @@ class BluetoothHidServer:
     The control channel (PSM 17) is monitored for HIDP protocol messages
     like SET_PROTOCOL; responses are sent automatically.
 
+    Multi-host: any number of bonded hosts may be connected at once,
+    each with its own socket pair and input state. Every send targets
+    exactly ONE host — explicit ``host=`` MAC, else the active host,
+    else the single connection. Other hosts never receive a byte.
+
     Usage::
 
         server = BluetoothHidServer()
         await server.start()
-        addr = await server.wait_for_connection()
+        asyncio.create_task(server.accept_forever())
 
-        # Keyboard
-        await server.send_keystroke("Enter")
+        # Keyboard (explicit host, or active/single fallback)
+        await server.send_keystroke("Enter", host="84:2F:57:7D:85:21")
         await server.send_key_combo(["ctrl"], "c")
         await server.send_text("hello")
 
@@ -311,15 +331,67 @@ class BluetoothHidServer:
         self._inter_char_delay = inter_char_delay
         self._control_sock: socket.socket | None = None
         self._interrupt_sock: socket.socket | None = None
-        self._control_client: socket.socket | None = None
-        self._interrupt_client: socket.socket | None = None
-        self._connected = False
-        self._mouse_buttons: int = 0
-        self._control_task: asyncio.Task[None] | None = None
+        # Multi-host: every connected host gets its own client record
+        # keyed by MAC, with its own socket pair and its own mouse-
+        # button state (a drag held on host A must not leak into a
+        # report sent to host B). Reports go ONLY to the addressed
+        # host — the others never see a byte.
+        self._clients: dict[str, _HidClient] = {}
+        # Half-open connections: a host opens the control channel
+        # first, then the interrupt channel. With several hosts
+        # connecting concurrently the accepts can interleave, so the
+        # two accept loops pair sockets by peer MAC here.
+        self._pending: dict[str, dict[str, socket.socket]] = {}
+        self._active_mac: str | None = None
+        self._stopping = False
 
     @property
     def is_connected(self) -> bool:
-        return self._connected
+        return bool(self._clients)
+
+    @property
+    def connected_hosts(self) -> list[str]:
+        return list(self._clients)
+
+    @property
+    def active_host(self) -> str | None:
+        return self._active_mac
+
+    def set_active_host(self, mac: str) -> None:
+        mac = mac.strip().upper()
+        if mac not in self._clients:
+            raise BtHidError(f"Host {mac} is not connected")
+        self._active_mac = mac
+
+    def _resolve(self, host: str | None) -> "_HidClient":
+        """Pick the client a report should go to.
+
+        Explicit ``host`` wins. Otherwise the active host, otherwise
+        the single connected host. Ambiguity (several hosts, no
+        active, no explicit host) is an error — silently picking one
+        would type into somebody's machine."""
+        if host:
+            mac = host.strip().upper()
+            client = self._clients.get(mac)
+            if client is None:
+                raise BtHidError(
+                    f"Host {mac} is not connected "
+                    f"(connected: {sorted(self._clients) or 'none'})"
+                )
+            return client
+        if self._active_mac is not None:
+            client = self._clients.get(self._active_mac)
+            if client is not None:
+                return client
+        if len(self._clients) == 1:
+            return next(iter(self._clients.values()))
+        if not self._clients:
+            raise BtHidError("No Bluetooth client connected")
+        raise BtHidError(
+            "Multiple hosts connected and no active host set — "
+            "pass 'host' or POST /bt/active-host first "
+            f"(connected: {sorted(self._clients)})"
+        )
 
     async def start(self) -> None:
         """Open L2CAP listening sockets."""
@@ -338,8 +410,9 @@ class BluetoothHidServer:
             )
             self._control_sock.bind(("00:00:00:00:00:00", PSM_CONTROL))
             self._interrupt_sock.bind(("00:00:00:00:00:00", PSM_INTERRUPT))
-            self._control_sock.listen(1)
-            self._interrupt_sock.listen(1)
+            # Backlog > 1: several hosts may (re)connect concurrently.
+            self._control_sock.listen(4)
+            self._interrupt_sock.listen(4)
             logger.info(
                 "Bluetooth HID server listening (PSM %d control, PSM %d interrupt)",
                 PSM_CONTROL, PSM_INTERRUPT,
@@ -347,26 +420,26 @@ class BluetoothHidServer:
         except OSError as e:
             raise BtHidError(f"Failed to create L2CAP sockets: {e}") from e
 
-    async def _control_channel_loop(self) -> None:
-        """Read and respond to HIDP messages on the control channel.
-
-        Runs as a background task while a client is connected.  Handles
+    async def _control_channel_loop(self, client: "_HidClient") -> None:
+        """Read and respond to HIDP messages on one host's control
+        channel. Runs as a background task per connected host. Handles
         SET_PROTOCOL (0x70/0x71) and GET_PROTOCOL (0x60) which macOS
-        sends during HID connection setup.
+        sends during HID connection setup. EOF means the host
+        disconnected — only THAT host's record is dropped.
         """
-        sock = self._control_client
-        if sock is None:
-            return
+        sock = client.ctrl
         loop = asyncio.get_running_loop()
         sock.setblocking(False)
         try:
-            while self._connected:
+            while client.mac in self._clients:
                 try:
                     data = await loop.sock_recv(sock, 1024)
                 except (BlockingIOError, OSError):
                     break
                 if not data:
-                    logger.info("Control channel closed by peer")
+                    logger.info(
+                        "Control channel closed by %s", client.mac,
+                    )
                     break
                 msg_type = data[0] & 0xF0
                 param = data[0] & 0x0F
@@ -399,49 +472,112 @@ class BluetoothHidServer:
                 else:
                     logger.info("Unhandled control msg type 0x%02X", msg_type)
         except Exception as e:
-            logger.debug("Control channel loop ended: %s", e)
+            logger.debug(
+                "Control channel loop for %s ended: %s", client.mac, e,
+            )
+        finally:
+            # Whatever ended the loop, this host is gone.
+            self._drop_client(client.mac, "control channel ended")
 
-    async def wait_for_connection(self) -> str:
-        """Wait for a Bluetooth host to connect. Returns host address."""
+    async def accept_forever(self) -> None:
+        """Accept connections from any number of hosts, forever.
+
+        Runs one accept loop per listening socket; control and
+        interrupt sockets are paired by peer MAC (concurrent hosts
+        can interleave their channel opens)."""
         if not self._control_sock or not self._interrupt_sock:
             raise BtHidError("Server not started")
+        logger.info("Waiting for Bluetooth HID connections (multi-host)...")
+        await asyncio.gather(
+            self._accept_loop(self._control_sock, "ctrl"),
+            self._accept_loop(self._interrupt_sock, "intr"),
+        )
 
+    async def _accept_loop(self, lsock: socket.socket, kind: str) -> None:
         loop = asyncio.get_running_loop()
-        logger.info("Waiting for Bluetooth HID connection...")
+        while not self._stopping:
+            try:
+                sock, addr = await loop.run_in_executor(None, lsock.accept)
+            except OSError:
+                return  # listener closed (stop())
+            mac = str(addr[0]).upper()
+            logger.info("%s channel connected from %s", kind, mac)
+            pend = self._pending.setdefault(mac, {})
+            old = pend.get(kind)
+            if old is not None:
+                try:
+                    old.close()
+                except OSError:
+                    pass
+            pend[kind] = sock
+            if "ctrl" in pend and "intr" in pend:
+                self._pending.pop(mac, None)
+                self._promote(mac, pend["ctrl"], pend["intr"])
 
-        self._control_client, ctrl_addr = await loop.run_in_executor(
-            None, self._control_sock.accept
+    def _promote(
+        self, mac: str, ctrl: socket.socket, intr: socket.socket,
+    ) -> None:
+        stale = self._clients.pop(mac, None)
+        if stale is not None:
+            self._close_client(stale)
+        client = _HidClient(mac, ctrl, intr)
+        self._clients[mac] = client
+        client.control_task = asyncio.create_task(
+            self._control_channel_loop(client),
         )
-        logger.info("Control channel connected from %s", ctrl_addr[0])
-
-        self._interrupt_client, intr_addr = await loop.run_in_executor(
-            None, self._interrupt_sock.accept
+        if self._active_mac is None:
+            self._active_mac = mac
+        logger.warning(
+            "Bluetooth HID host connected: %s (%d connected: %s; "
+            "active: %s)",
+            mac, len(self._clients), sorted(self._clients),
+            self._active_mac,
         )
-        logger.info("Interrupt channel connected from %s", intr_addr[0])
 
-        self._connected = True
+    def _close_client(self, client: "_HidClient") -> None:
+        task = client.control_task
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+        for sock in (client.intr, client.ctrl):
+            try:
+                sock.close()
+            except OSError:
+                pass
 
-        # Start reading control channel messages in the background
-        self._control_task = asyncio.create_task(self._control_channel_loop())
+    def _drop_client(self, mac: str, reason: str) -> None:
+        client = self._clients.pop(mac, None)
+        if client is None:
+            return
+        self._close_client(client)
+        if self._active_mac == mac:
+            self._active_mac = next(iter(self._clients), None)
+        logger.warning(
+            "Bluetooth HID host disconnected: %s (%s; %d remain: %s; "
+            "active: %s)",
+            mac, reason, len(self._clients), sorted(self._clients),
+            self._active_mac,
+        )
 
-        return ctrl_addr[0]
-
-    async def _send_raw(self, data: bytes) -> None:
-        """Send raw bytes on the interrupt channel."""
-        if not self._interrupt_client:
-            raise BtHidError("No Bluetooth client connected")
+    async def _send_raw(
+        self, data: bytes, client: "_HidClient",
+    ) -> None:
+        """Send raw bytes on ONE host's interrupt channel."""
         loop = asyncio.get_running_loop()
         try:
-            await loop.run_in_executor(None, self._interrupt_client.send, data)
+            await loop.run_in_executor(None, client.intr.send, data)
         except OSError as e:
-            self._connected = False
-            raise BtHidError(f"Failed to send HID report: {e}") from e
+            self._drop_client(client.mac, f"send failed: {e}")
+            raise BtHidError(
+                f"Failed to send HID report to {client.mac}: {e}",
+            ) from e
 
     # ------------------------------------------------------------------
     # Keyboard
     # ------------------------------------------------------------------
 
-    async def _send_keyboard_report(self, modifier: int, scan_code: int) -> None:
+    async def _send_keyboard_report(
+        self, modifier: int, scan_code: int, client: "_HidClient",
+    ) -> None:
         """Send a keyboard HID report (report ID 1)."""
         # 0xA1 = HIDP DATA|INPUT, then report ID, then 8 bytes keyboard
         report = bytes([
@@ -449,20 +585,22 @@ class BluetoothHidServer:
             REPORT_ID_KEYBOARD,
             modifier, 0x00, scan_code, 0x00, 0x00, 0x00, 0x00, 0x00,
         ])
-        await self._send_raw(report)
+        await self._send_raw(report, client)
 
-    async def _release_keyboard(self) -> None:
+    async def _release_keyboard(self, client: "_HidClient") -> None:
         """Send an all-zeros keyboard report (release all keys)."""
         report = bytes([0xA1, REPORT_ID_KEYBOARD]) + _KB_RELEASE
-        await self._send_raw(report)
+        await self._send_raw(report, client)
 
-    async def _tap_key(self, modifier: int, scan_code: int) -> None:
+    async def _tap_key(
+        self, modifier: int, scan_code: int, client: "_HidClient",
+    ) -> None:
         """Press and release a key with timing."""
-        await self._send_keyboard_report(modifier, scan_code)
+        await self._send_keyboard_report(modifier, scan_code, client)
         await asyncio.sleep(self._keypress_delay)
-        await self._release_keyboard()
+        await self._release_keyboard(client)
 
-    async def _keystroke_preflight(self) -> None:
+    async def _keystroke_preflight(self, client: "_HidClient") -> None:
         """Clear lingering keyboard state and let the receiver's
         input subsystem drain before sending a new key.
 
@@ -478,14 +616,17 @@ class BluetoothHidServer:
         """
         for _ in range(2):
             try:
-                await self._release_keyboard()
+                await self._release_keyboard(client)
             except Exception:
                 pass
             await asyncio.sleep(0.08)
         await asyncio.sleep(0.15)
 
-    async def send_keystroke(self, key: str) -> None:
+    async def send_keystroke(
+        self, key: str, *, host: str | None = None,
+    ) -> None:
         """Send a named key (e.g., 'Enter', 'Tab', 'a')."""
+        client = self._resolve(host)
         if key in SHIFT_CHARS:
             modifier, scan_code = char_to_hid(key)
         elif len(key) == 1:
@@ -493,12 +634,18 @@ class BluetoothHidServer:
         else:
             scan_code = key_name_to_hid(key)
             modifier = MODIFIER_NONE
-        await self._keystroke_preflight()
-        await self._tap_key(modifier, scan_code)
-        logger.debug("BT keystroke: %s (mod=0x%02X scan=0x%02X)", key, modifier, scan_code)
+        await self._keystroke_preflight(client)
+        await self._tap_key(modifier, scan_code, client)
+        logger.debug(
+            "BT keystroke → %s: %s (mod=0x%02X scan=0x%02X)",
+            client.mac, key, modifier, scan_code,
+        )
 
-    async def send_key_combo(self, modifiers: list[str], key: str) -> None:
+    async def send_key_combo(
+        self, modifiers: list[str], key: str, *, host: str | None = None,
+    ) -> None:
         """Send a key combination (e.g., ctrl+c)."""
+        client = self._resolve(host)
         mod_bitmask = modifiers_to_bitmask(modifiers)
         if key in SHIFT_CHARS:
             base_char = SHIFT_CHARS[key]
@@ -506,14 +653,16 @@ class BluetoothHidServer:
             mod_bitmask |= MODIFIER_LEFT_SHIFT
         else:
             scan_code = key_name_to_hid(key)
-        await self._keystroke_preflight()
-        await self._tap_key(mod_bitmask, scan_code)
+        await self._keystroke_preflight(client)
+        await self._tap_key(mod_bitmask, scan_code, client)
         logger.debug(
-            "BT combo: %s+%s (mod=0x%02X scan=0x%02X)",
-            "+".join(modifiers), key, mod_bitmask, scan_code,
+            "BT combo → %s: %s+%s (mod=0x%02X scan=0x%02X)",
+            client.mac, "+".join(modifiers), key, mod_bitmask, scan_code,
         )
 
-    async def send_text(self, text: str, *, warmup: bool = True) -> None:
+    async def send_text(
+        self, text: str, *, warmup: bool = True, host: str | None = None,
+    ) -> None:
         """Type a string character by character.
 
         Pre-flight (defensive against the receiving end's input
@@ -540,11 +689,12 @@ class BluetoothHidServer:
         """
         if not text:
             return
+        client = self._resolve(host)
         # Pre-flight: three releases + 500ms settle. Drains any
         # half-processed report state on the receiver side.
         for _ in range(3):
             try:
-                await self._release_keyboard()
+                await self._release_keyboard(client)
             except Exception:
                 pass
             await asyncio.sleep(0.10)
@@ -570,11 +720,11 @@ class BluetoothHidServer:
         if warmup:
             first_mod, first_scan = char_to_hid(text[0])
             bs_scan = key_name_to_hid("Backspace")
-            await self._tap_key(first_mod, first_scan)
+            await self._tap_key(first_mod, first_scan, client)
             await asyncio.sleep(self._inter_char_delay)
-            await self._tap_key(MODIFIER_NONE, bs_scan)
+            await self._tap_key(MODIFIER_NONE, bs_scan, client)
             await asyncio.sleep(self._inter_char_delay)
-            await self._tap_key(first_mod, first_scan)
+            await self._tap_key(first_mod, first_scan, client)
             await asyncio.sleep(self._inter_char_delay)
 
             chars_iter = text[1:]
@@ -583,16 +733,17 @@ class BluetoothHidServer:
 
         for char in chars_iter:
             modifier, scan_code = char_to_hid(char)
-            await self._tap_key(modifier, scan_code)
+            await self._tap_key(modifier, scan_code, client)
             await asyncio.sleep(self._inter_char_delay)
-        logger.debug("BT text: %s", text[:50])
+        logger.debug("BT text → %s: %s", client.mac, text[:50])
 
     # ------------------------------------------------------------------
     # Mouse
     # ------------------------------------------------------------------
 
     async def _send_mouse_report(
-        self, buttons: int, x: int, y: int, wheel: int
+        self, buttons: int, x: int, y: int, wheel: int,
+        client: "_HidClient",
     ) -> None:
         """Send a mouse HID report (report ID 2)."""
         x = _clamp(x)
@@ -601,46 +752,67 @@ class BluetoothHidServer:
         # 0xA1 header + report ID 2 + 4 bytes mouse data
         # buttons is unsigned byte, x/y are signed, wheel is signed
         report = struct.pack("BBBbbb", 0xA1, REPORT_ID_MOUSE, buttons, x, y, wheel)
-        await self._send_raw(report)
+        await self._send_raw(report, client)
 
-    async def move(self, x: int, y: int) -> None:
+    async def move(
+        self, x: int, y: int, *, host: str | None = None,
+    ) -> None:
         """Move the mouse cursor by (x, y) relative pixels."""
-        await self._send_mouse_report(self._mouse_buttons, x, y, 0)
-        logger.debug("BT mouse move: dx=%d dy=%d", x, y)
+        client = self._resolve(host)
+        await self._send_mouse_report(client.mouse_buttons, x, y, 0, client)
+        logger.debug("BT mouse move → %s: dx=%d dy=%d", client.mac, x, y)
 
-    async def click(self, button: str = "left") -> None:
+    async def click(
+        self, button: str = "left", *, host: str | None = None,
+    ) -> None:
         """Click a mouse button (press and release)."""
-        await self.press(button)
+        await self.press(button, host=host)
         await asyncio.sleep(0.05)
-        await self.release(button)
+        await self.release(button, host=host)
         logger.debug("BT mouse click: %s", button)
 
-    async def press(self, button: str = "left") -> None:
+    async def press(
+        self, button: str = "left", *, host: str | None = None,
+    ) -> None:
         """Hold a mouse button down. Stays pressed until release(); used
         by drag-and-drop where moves between press/release become drag
-        deltas instead of cursor-only motion."""
+        deltas instead of cursor-only motion. Button state is PER HOST
+        — a drag held on one host never leaks into another's reports."""
         btn = BUTTON_MAP.get(button.lower())
         if btn is None:
             raise ValueError(f"Unknown button: {button!r}. Use: left, right, middle")
-        self._mouse_buttons |= btn
-        await self._send_mouse_report(self._mouse_buttons, 0, 0, 0)
-        logger.debug("BT mouse press: %s", button)
+        client = self._resolve(host)
+        client.mouse_buttons |= btn
+        await self._send_mouse_report(
+            client.mouse_buttons, 0, 0, 0, client,
+        )
+        logger.debug("BT mouse press → %s: %s", client.mac, button)
 
-    async def release(self, button: str = "left") -> None:
+    async def release(
+        self, button: str = "left", *, host: str | None = None,
+    ) -> None:
         """Release a previously-pressed mouse button. Idempotent —
         releasing an already-released button just resends the current
         button state (cheap no-op)."""
         btn = BUTTON_MAP.get(button.lower())
         if btn is None:
             raise ValueError(f"Unknown button: {button!r}. Use: left, right, middle")
-        self._mouse_buttons &= ~btn
-        await self._send_mouse_report(self._mouse_buttons, 0, 0, 0)
-        logger.debug("BT mouse release: %s", button)
+        client = self._resolve(host)
+        client.mouse_buttons &= ~btn
+        await self._send_mouse_report(
+            client.mouse_buttons, 0, 0, 0, client,
+        )
+        logger.debug("BT mouse release → %s: %s", client.mac, button)
 
-    async def scroll(self, amount: int) -> None:
+    async def scroll(
+        self, amount: int, *, host: str | None = None,
+    ) -> None:
         """Scroll the mouse wheel. Positive=up, negative=down."""
-        await self._send_mouse_report(self._mouse_buttons, 0, 0, amount)
-        logger.debug("BT mouse scroll: %d", amount)
+        client = self._resolve(host)
+        await self._send_mouse_report(
+            client.mouse_buttons, 0, 0, amount, client,
+        )
+        logger.debug("BT mouse scroll → %s: %d", client.mac, amount)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -648,23 +820,22 @@ class BluetoothHidServer:
 
     async def stop(self) -> None:
         """Close all sockets and cancel background tasks."""
-        self._connected = False
-        if self._control_task is not None:
-            self._control_task.cancel()
-            self._control_task = None
-        for sock in (
-            self._interrupt_client,
-            self._control_client,
-            self._interrupt_sock,
-            self._control_sock,
-        ):
+        self._stopping = True
+        for mac in list(self._clients):
+            self._drop_client(mac, "server stopping")
+        for pend in self._pending.values():
+            for sock in pend.values():
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        self._pending.clear()
+        for sock in (self._interrupt_sock, self._control_sock):
             if sock is not None:
                 try:
                     sock.close()
                 except OSError:
                     pass
-        self._interrupt_client = None
-        self._control_client = None
         self._interrupt_sock = None
         self._control_sock = None
         logger.info("Bluetooth HID server stopped")

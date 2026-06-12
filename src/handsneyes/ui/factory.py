@@ -91,10 +91,12 @@ def make_target_context_factory(
 
         raw_kb = HttpKeyboardOutput(
             base_url=target.pi_url, timeout=10.0, transport=target.transport,
+            host_mac=target.bt_host_mac or None,
         )
         keyboard = PlatformKeyboard(raw_kb, adapter)
         mouse = HttpMouseOutput(
             base_url=target.pi_url, timeout=10.0, transport=target.transport,
+            host_mac=target.bt_host_mac or None,
         )
         try:
             await raw_kb.connect()

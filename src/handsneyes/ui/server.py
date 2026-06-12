@@ -141,6 +141,10 @@ class CaptureSourceRequest(BaseModel):
     self_capture: bool
 
 
+class TargetSwitchRequest(BaseModel):
+    name: str
+
+
 class MouseClickAtRequest(BaseModel):
     x_pct: float = Field(ge=0.0, le=1.0)
     y_pct: float = Field(ge=0.0, le=1.0)
@@ -1407,7 +1411,11 @@ def create_app(
                     # a fresh cc session reuses the per-target file
                     # instead of re-paying the ~3 s calibration slam
                     # on its first click.
-                    payload = _load_homer_calibration(target_name)
+                    payload = _load_homer_calibration(
+                        (app.state.runtime_state or {}).get(
+                            "active_target", target_name,
+                        ),
+                    )
                 if payload is not None:
                     # Backwards-compatible unpack — the payload
                     # has grown across versions:
@@ -1481,7 +1489,12 @@ def create_app(
                     # Cross-session persistence: the same payload,
                     # keyed by target. The next cc session's first
                     # click starts already-calibrated.
-                    _save_homer_calibration(target_name, payload)
+                    _save_homer_calibration(
+                        (app.state.runtime_state or {}).get(
+                            "active_target", target_name,
+                        ),
+                        payload,
+                    )
                     # Every successful click produced a fresh
                     # history.jsonl trajectory — a new training row
                     # for the homer's retrain pipeline.
@@ -3053,6 +3066,54 @@ def create_app(
     # effect on the NEXT /api/run or /api/mouse/click_at — already-
     # running runs aren't interrupted. CaptureSourceRequest lives at
     # module scope alongside the other body schemas.
+
+    # ── multi-target switcher ──────────────────────────────────────
+    # The cli builds one context factory per configured target and a
+    # dispatcher that reads runtime_state["active_target"] on every
+    # new run/click. Switching computers is therefore just a state
+    # flip — the multi-host BT gateway keeps every target's HID link
+    # alive simultaneously, and each target's factory carries its own
+    # bt_host_mac so reports route to the right machine.
+
+    @app.get("/api/targets")
+    def list_targets() -> JSONResponse:
+        rs = app.state.runtime_state or {}
+        meta = rs.get("targets_meta") or {}
+        return JSONResponse({
+            "active": rs.get("active_target"),
+            "targets": [
+                {"name": name, **info} for name, info in meta.items()
+            ],
+        })
+
+    @app.post("/api/target")
+    def switch_target(req: TargetSwitchRequest) -> JSONResponse:
+        if runner.is_busy():
+            raise HTTPException(409, "a run is currently in progress")
+        rs = app.state.runtime_state
+        if rs is None:
+            raise HTTPException(501, "target switching not wired (no runtime state)")
+        meta = rs.get("targets_meta") or {}
+        if req.name not in meta:
+            raise HTTPException(
+                404,
+                f"unknown target {req.name!r} (have: {sorted(meta)})",
+            )
+        rs["active_target"] = req.name
+        # Capture source follows the target's own configuration; a
+        # lingering self-capture override from the previous target
+        # would otherwise grab the LOCAL screen while driving the
+        # remote machine.
+        rs["use_self_capture"] = (
+            meta[req.name].get("capture_source") == "screen"
+        )
+        logger.info("active target → %s", req.name)
+        return JSONResponse({
+            "ok": True,
+            "active": req.name,
+            "platform": meta[req.name].get("platform"),
+            "self_capture": rs["use_self_capture"],
+        })
 
     @app.get("/api/capture-source")
     def capture_source_state() -> JSONResponse:

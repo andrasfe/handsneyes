@@ -33,11 +33,16 @@ class HttpKeyboardOutput(KeyboardOutput):
         base_url: str = "http://localhost:8080",
         timeout: float = 10.0,
         transport: str = "usb",
+        host_mac: str | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._transport = transport
         self._prefix = "/bt" if transport == "bt" else ""
+        # Multi-host BT gateway: which host this output drives. Every
+        # /bt/* request carries it so the gateway routes the report
+        # to exactly this machine even with several hosts connected.
+        self._host_mac = host_mac.strip().upper() if host_mac else None
         self._client: httpx.AsyncClient | None = None
 
     async def connect(self) -> None:
@@ -123,6 +128,8 @@ class HttpKeyboardOutput(KeyboardOutput):
             raise KeyboardOutputError(
                 "Not connected to endpoint", backend="http"
             )
+        if self._host_mac and path.startswith("/bt"):
+            payload = {**payload, "host": self._host_mac}
         try:
             resp = await self._client.post(path, json=payload)
             resp.raise_for_status()

@@ -59,6 +59,12 @@ class Target:
     # input distribution of pointer-accel models trained on raw
     # frames (retrain before enabling on a tuned linux target).
     rectify: bool = False
+    # The target machine's Bluetooth MAC. With the multi-host Pi
+    # gateway several targets stay connected simultaneously; setting
+    # this routes every HID report for THIS target to THIS machine
+    # only. Empty = gateway's active-host / single-connection
+    # fallback (fine when only one host is ever connected).
+    bt_host_mac: str = ""
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -145,6 +151,7 @@ class TargetRegistry:
                 description=str(row.get("description", "")),
                 capture_source=str(row.get("capture_source", "webcam")),
                 rectify=bool(row.get("rectify", False)),
+                bt_host_mac=str(row.get("bt_host_mac", "")).strip().upper(),
             )
         return cls(targets=targets, source=path)
 

@@ -40,10 +40,15 @@ class HttpMouseOutput(MouseOutput):
         base_url: str = "http://10.0.0.2:8080",
         timeout: float = 10.0,
         transport: str = "bt",
+        host_mac: str | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._transport = transport
+        # Multi-host BT gateway: which host this output drives. Every
+        # /bt/* request carries it so the gateway routes the report
+        # to exactly this machine even with several hosts connected.
+        self._host_mac = host_mac.strip().upper() if host_mac else None
         self._client: httpx.AsyncClient | None = None
 
         if transport == "bt":
@@ -146,6 +151,8 @@ class HttpMouseOutput(MouseOutput):
         """Send a POST request to the Pi."""
         if self._client is None:
             raise MouseOutputError("Not connected to Pi", backend="http")
+        if self._host_mac and path.startswith("/bt"):
+            payload = {**payload, "host": self._host_mac}
         try:
             resp = await self._client.post(path, json=payload)
             resp.raise_for_status()

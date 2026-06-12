@@ -199,11 +199,13 @@ def _cmd_do(args: argparse.Namespace) -> int:
         raw_kb = HttpKeyboardOutput(
             base_url=target.pi_url,
             transport=target.transport,
+            host_mac=target.bt_host_mac or None,
         )
         keyboard = PlatformKeyboard(raw_kb, adapter)
         mouse = HttpMouseOutput(
             base_url=target.pi_url,
             transport=target.transport,
+            host_mac=target.bt_host_mac or None,
         )
     ctx = AgentContext(
         keyboard=keyboard,  # type: ignore[arg-type]
@@ -392,29 +394,80 @@ def _cmd_commandcenter(args: argparse.Namespace) -> int:
 
     store = FrameStore(watch_dir=watch_dir, max_frames=args.max_frames)
     bus = LogBus()
-    # Shared runtime state — flipped by /api/capture-source from the
-    # UI, read by the context factory on each new run. Lets the
-    # "self capture" checkbox take effect without a cc restart.
+    # Shared runtime state — flipped by /api/capture-source and
+    # /api/target from the UI, read by the context factory on each
+    # new run. Lets the "self capture" checkbox and the computer
+    # switcher take effect without a cc restart.
     runtime_state: dict = {
         "use_self_capture": target.capture_source == "screen",
+        "active_target": chosen,
     }
-    context_factory = make_target_context_factory(
-        target, adapter, base_dir=watch_dir, bus=bus,
-        runtime_state=runtime_state,
-    )
+
+    # One factory per configured target so the UI can switch
+    # computers live. The dispatching factory looks up the active
+    # target on EVERY new run/click — nothing else in the server
+    # needs to know more than one target exists.
+    factories: dict = {}
+    targets_meta: dict = {}
+    for name in names:
+        t = registry.get(name)
+        try:
+            a = adapter if name == chosen else load_adapter(t.platform)
+        except UnknownPlatformError:
+            continue
+        factories[name] = make_target_context_factory(
+            t, a, base_dir=watch_dir, bus=bus,
+            runtime_state=runtime_state,
+        )
+        targets_meta[name] = {
+            "platform": t.platform,
+            "capture_source": t.capture_source,
+            "description": t.description,
+            "bt_host_mac": t.bt_host_mac,
+        }
+    runtime_state["targets_meta"] = targets_meta
+
+    async def context_factory():
+        return await factories[runtime_state["active_target"]]()
 
     # Settings-shape shim for the manual snapshot + commander_cfg paths
     # in server.py. Those handlers were ported verbatim from
     # terminaleyes' pydantic settings layer; handsneyes carries the
     # equivalent state on Target + platform adapter, so we adapt here.
+    # Attributes are PROPERTIES so they follow the active target when
+    # the UI switches computers.
+    def _active() -> object:
+        return registry.get(runtime_state["active_target"])
+
     class _CaptureCfg:
-        device_index = target.camera_index
-        resolution_width, resolution_height = target.screen_size
+        @property
+        def device_index(self):
+            return _active().camera_index
+
+        @property
+        def resolution_width(self):
+            return _active().screen_size[0]
+
+        @property
+        def resolution_height(self):
+            return _active().screen_size[1]
 
     class _CommanderCfg:
-        pi_base_url = target.pi_url
-        transport = target.transport
-        screen_width, screen_height = target.screen_size
+        @property
+        def pi_base_url(self):
+            return _active().pi_url
+
+        @property
+        def transport(self):
+            return _active().transport
+
+        @property
+        def screen_width(self):
+            return _active().screen_size[0]
+
+        @property
+        def screen_height(self):
+            return _active().screen_size[1]
 
     class _Settings:
         capture = _CaptureCfg()

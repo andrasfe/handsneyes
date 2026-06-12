@@ -51,16 +51,30 @@ logger = logging.getLogger(__name__)
 # Request / response models
 # ---------------------------------------------------------------------------
 
-class KeystrokeRequest(BaseModel):
+class _BtRoutable(BaseModel):
+    """Mixin: optional per-request BT host routing.
+
+    ``host`` is the target's Bluetooth MAC. Omitted = the gateway's
+    active host (or the single connection). With several hosts
+    connected, every report goes ONLY to the addressed host."""
+
+    host: str | None = Field(
+        default=None,
+        description="Target host MAC (e.g. '84:2F:57:7D:85:21'). "
+        "Only meaningful for /bt/* endpoints.",
+    )
+
+
+class KeystrokeRequest(_BtRoutable):
     key: str = Field(description="Key name (e.g., 'Enter', 'Tab', 'a')")
 
 
-class KeyComboRequest(BaseModel):
+class KeyComboRequest(_BtRoutable):
     modifiers: list[str] = Field(description="Modifier keys (e.g., ['ctrl'])")
     key: str = Field(description="Main key in the combination")
 
 
-class TextInputRequest(BaseModel):
+class TextInputRequest(_BtRoutable):
     text: str = Field(description="Text to type")
     warmup: bool = Field(
         default=True,
@@ -76,18 +90,18 @@ class TextInputRequest(BaseModel):
     )
 
 
-class MouseMoveRequest(BaseModel):
+class MouseMoveRequest(_BtRoutable):
     x: int = Field(description="Relative X movement (-127 to 127)")
     y: int = Field(description="Relative Y movement (-127 to 127)")
 
 
-class MouseClickRequest(BaseModel):
+class MouseClickRequest(_BtRoutable):
     button: str = Field(default="left", description="Button: left, right, middle")
     count: int = Field(default=1, ge=1, le=5, description="Number of clicks (1=single, 2=double, 3=triple)")
     inter_click_ms: int = Field(default=40, ge=0, le=200, description="Sleep between successive clicks (ms)")
 
 
-class MouseScrollRequest(BaseModel):
+class MouseScrollRequest(_BtRoutable):
     amount: int = Field(description="Scroll amount (-127 to 127, positive=up)")
 
 
@@ -98,6 +112,14 @@ class HealthResponse(BaseModel):
     mouse_hid_device: str = "/dev/hidg1"
     mouse_hid_open: bool = False
     bt_hid_connected: bool = False
+    # Multi-host BT: every connected host MAC + which one unaddressed
+    # /bt/* requests route to.
+    bt_hosts: list[str] = []
+    bt_active_host: str | None = None
+
+
+class ActiveHostRequest(BaseModel):
+    host: str = Field(description="MAC of a CONNECTED host")
 
 
 # ---------------------------------------------------------------------------
@@ -179,15 +201,15 @@ def create_app(
                 logger.info("Bluetooth HID server started (keyboard + mouse)")
                 logger.info("Waiting for Bluetooth pairing in background...")
 
-                # Accept connections in background so the REST API stays responsive
+                # Accept connections in background so the REST API
+                # stays responsive. Multi-host: accept_forever pairs
+                # control/interrupt channels by peer MAC, any number
+                # of hosts.
                 async def _accept_bt_loop() -> None:
-                    while True:
-                        try:
-                            addr = await bt.wait_for_connection()
-                            logger.info("Bluetooth device connected: %s", addr)
-                        except Exception as e:
-                            logger.warning("Bluetooth accept error: %s", e)
-                            break
+                    try:
+                        await bt.accept_forever()
+                    except Exception as e:
+                        logger.warning("Bluetooth accept loops ended: %s", e)
 
                 bt_accept_task = asyncio.create_task(_accept_bt_loop())
 
@@ -332,9 +354,6 @@ def create_app(
                     await asyncio.sleep(BT_RECONNECT_INTERVAL_S)
                     while True:
                         try:
-                            if bt.is_connected:
-                                await asyncio.sleep(BT_RECONNECT_INTERVAL_S)
-                                continue
                             macs = await _list_trusted_macs()
                             if not macs:
                                 logger.warning(
@@ -343,9 +362,12 @@ def create_app(
                                 )
                                 await asyncio.sleep(BT_RECONNECT_INTERVAL_S)
                                 continue
+                            # Multi-host: try to bring EVERY trusted
+                            # bonded host online, not just the first.
+                            connected = set(bt.connected_hosts)
                             for mac in macs:
-                                if bt.is_connected:
-                                    break
+                                if mac.upper() in connected:
+                                    continue
                                 # Only attempt connect when BR/EDR is
                                 # also down — Pi-initiated reconnect
                                 # can re-establish the BR/EDR control
@@ -373,16 +395,10 @@ def create_app(
                                     "attempting %s", mac,
                                 )
                                 ok = await _try_connect(mac)
-                                if ok:
-                                    logger.warning(
-                                        "BT reconnect: %s connect OK", mac,
-                                    )
-                                    break
-                                else:
-                                    logger.warning(
-                                        "BT reconnect: %s connect failed",
-                                        mac,
-                                    )
+                                logger.warning(
+                                    "BT reconnect: %s connect %s",
+                                    mac, "OK" if ok else "failed",
+                                )
                             await asyncio.sleep(BT_RECONNECT_INTERVAL_S)
                         except asyncio.CancelledError:
                             return
@@ -440,7 +456,33 @@ def create_app(
             mouse_hid_device=mouse_hid_device,
             mouse_hid_open=mw.is_open if mw else False,
             bt_hid_connected=bt.is_connected if bt else False,
+            bt_hosts=sorted(bt.connected_hosts) if bt else [],
+            bt_active_host=bt.active_host if bt else None,
         )
+
+    @app.get("/bt/hosts")
+    async def bt_hosts() -> dict:
+        bt = _get_bt()
+        return {
+            "connected": sorted(bt.connected_hosts),
+            "active": bt.active_host,
+        }
+
+    @app.post("/bt/active-host")
+    async def bt_active_host(request: ActiveHostRequest) -> dict:
+        """Pick which connected host unaddressed /bt/* requests go to.
+
+        Per-request ``host`` fields always override this."""
+        bt = _get_bt()
+        try:
+            bt.set_active_host(request.host)
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        return {
+            "status": "ok",
+            "active": bt.active_host,
+            "connected": sorted(bt.connected_hosts),
+        }
 
     # -------------------------------------------------------------------
     # USB HID keyboard endpoints
@@ -525,7 +567,7 @@ def create_app(
     async def bt_keystroke(request: KeystrokeRequest) -> dict[str, str]:
         bt = _get_bt()
         try:
-            await bt.send_keystroke(request.key)
+            await bt.send_keystroke(request.key, host=request.host)
         except (ValueError, Exception) as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {"status": "ok", "key": request.key, "transport": "bluetooth"}
@@ -534,7 +576,7 @@ def create_app(
     async def bt_key_combo(request: KeyComboRequest) -> dict[str, str]:
         bt = _get_bt()
         try:
-            await bt.send_key_combo(request.modifiers, request.key)
+            await bt.send_key_combo(request.modifiers, request.key, host=request.host)
         except (ValueError, Exception) as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {
@@ -547,7 +589,7 @@ def create_app(
     async def bt_text(request: TextInputRequest) -> dict[str, str]:
         bt = _get_bt()
         try:
-            await bt.send_text(request.text, warmup=request.warmup)
+            await bt.send_text(request.text, warmup=request.warmup, host=request.host)
         except (ValueError, Exception) as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {"status": "ok", "length": str(len(request.text)), "transport": "bluetooth"}
@@ -560,7 +602,7 @@ def create_app(
     async def bt_mouse_move(request: MouseMoveRequest) -> dict[str, str]:
         bt = _get_bt()
         try:
-            await bt.move(request.x, request.y)
+            await bt.move(request.x, request.y, host=request.host)
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {"status": "ok", "x": str(request.x), "y": str(request.y)}
@@ -592,7 +634,7 @@ def create_app(
                 sx = max(-127, min(127, rem_x))
                 sy = max(-127, min(127, rem_y))
                 if sx != 0 or sy != 0:
-                    await bt.move(sx, sy)
+                    await bt.move(sx, sy, host=request.host)
                     n_reports += 1
                 rem_x -= sx
                 rem_y -= sy
@@ -620,12 +662,12 @@ def create_app(
         """
         bt = _get_bt()
         try:
-            await bt.click(request.button)
+            await bt.click(request.button, host=request.host)
             for _ in range(1, request.count):
                 if request.inter_click_ms > 0:
                     import asyncio as _aio
                     await _aio.sleep(request.inter_click_ms / 1000.0)
-                await bt.click(request.button)
+                await bt.click(request.button, host=request.host)
         except (ValueError, Exception) as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {
@@ -638,7 +680,7 @@ def create_app(
     async def bt_mouse_press(request: MouseClickRequest) -> dict[str, str]:
         bt = _get_bt()
         try:
-            await bt.press(request.button)
+            await bt.press(request.button, host=request.host)
         except (ValueError, Exception) as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {"status": "ok", "button": request.button, "state": "pressed"}
@@ -647,7 +689,7 @@ def create_app(
     async def bt_mouse_release(request: MouseClickRequest) -> dict[str, str]:
         bt = _get_bt()
         try:
-            await bt.release(request.button)
+            await bt.release(request.button, host=request.host)
         except (ValueError, Exception) as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {"status": "ok", "button": request.button, "state": "released"}
@@ -656,7 +698,7 @@ def create_app(
     async def bt_mouse_scroll(request: MouseScrollRequest) -> dict[str, str]:
         bt = _get_bt()
         try:
-            await bt.scroll(request.amount)
+            await bt.scroll(request.amount, host=request.host)
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {"status": "ok", "amount": str(request.amount)}
