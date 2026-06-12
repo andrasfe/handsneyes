@@ -87,13 +87,35 @@ def test_stock_cursor_templates_cached() -> None:
     a = stock_cursor_templates()
     b = stock_cursor_templates()
     assert a is b
-    assert len(a) == len(DEFAULT_HEIGHTS_PX)
+    arrows = [t for t in a if t.name.startswith("macos-arrow-")]
+    assert len(arrows) == len(DEFAULT_HEIGHTS_PX)
 
 
 def test_macos_adapter_ships_templates() -> None:
     templates = MacOSAdapter().cursor_templates()
     assert templates
-    assert all(t.name.startswith("macos-arrow-") for t in templates)
+    assert all(
+        t.name.startswith(("macos-arrow-", "macos-hand-"))
+        for t in templates
+    )
+    # The hand ladder ships too (extracted from a live HDMI frame).
+    assert any(t.name.startswith("macos-hand-") for t in templates)
+
+
+def test_hand_templates_well_formed() -> None:
+    from handsneyes.platforms.macos.cursor_templates import (
+        hand_cursor_templates,
+    )
+
+    hands = hand_cursor_templates()
+    assert hands
+    for t in hands:
+        m = t.mask > 0
+        assert m.sum() > 0
+        assert abs(float(t.image[m].mean())) < 1e-2
+        hx, hy = t.hotspot_px
+        assert 0 <= hx < t.image.shape[1]
+        assert 0 <= hy < t.image.shape[0]
 
 
 @pytest.mark.parametrize("height", [14, 21, 31, 42])

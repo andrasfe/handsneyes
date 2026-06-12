@@ -30,8 +30,12 @@ iterations → click. Each iteration localizes the cursor by, in
 priority order:
 
 1. **stock-template match** (macOS only; pixel-precise, returns the
-   hotspot directly) — log line `template hit (macos-arrow-13, …)`,
-   corrections marked `[trusted]` may burst up to 2500 HID;
+   hotspot directly) — log line `template hit (macos-arrow-13, …)` or
+   `(macos-hand-21, …)` (the pointing hand: links, buttons, Slack
+   channel rows). Hits scoring ≥0.55 are marked `[trusted]` and may
+   burst up to 2500 HID; marginal hits (0.40-0.55) localize with the
+   cautious clamp only — a 0.41 arrow match once locked onto static
+   sidebar text and committed 24 px off;
 2. **frame-diff** vs the previous iteration's frame, elected by
    predicted position — untrusted, clamped to ±400 HID;
 3. **oscillation-variance** (slow jiggle) as last resort.
@@ -69,6 +73,17 @@ iterations. Watch for:
   `within tol` line.
 - Good numbers (1080p HDMI capture): median ≤ 5 px, max ≤ 10 px,
   8-12 s per click (first click +10 s for calibration).
+
+## Clicks on the wrong list item ≠ imprecision
+
+If clicks select the wrong row in a reordering list (Slack sidebar
+re-sorts after every selection change), the cursor may be landing
+EXACTLY where aimed — on coordinates from a stale frame. Use
+**anchored clicks**: `/api/mouse/click_at {"anchor": true}` (or the
+cc UI's "anchor" checkbox) OCRs the word under the click point in
+the last stored frame, re-finds it in a fresh capture, and clicks
+where it is NOW. Needs `pytesseract` installed; falls back to raw
+coordinates when OCR can't anchor (note in the log).
 
 ## Bring-up order for a new target
 

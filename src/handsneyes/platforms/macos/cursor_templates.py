@@ -13,6 +13,8 @@ setting). The matcher tries all scales and keeps the best score.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 
@@ -101,6 +103,71 @@ def render_arrow_template(height_px: int) -> CursorTemplate:
 # real I-beam well enough to localize it. Don't re-add without
 # validating against real frames first.
 
+
+# The pointing-hand cursor (links, buttons, Slack channel rows —
+# exactly the zones where click precision matters most). Unlike the
+# failed synthetic I-beam, this one is EXTRACTED from a real remote-
+# Mac HDMI frame (1080p, hand ≈ 21 px tall) and validated against a
+# second live frame: score 0.60 at the true position, false-positive
+# ceiling 0.27 over hand-free text. Hotspot = index fingertip,
+# derived from the bright component's topmost pixel.
+_HAND_NPZ = (
+    Path(__file__).resolve().parent / "models" / "cursor_hand"
+    / "hand.npz"
+)
+HAND_SCALES = (0.7, 0.85, 1.0, 1.3, 1.7, 2.2)
+
+
+def _rescale_template(
+    base_img: np.ndarray,
+    base_mask: np.ndarray,
+    base_hotspot: tuple[float, float],
+    scale: float,
+    name: str,
+) -> CursorTemplate:
+    if scale == 1.0:
+        img, mask = base_img.copy(), base_mask.copy()
+    else:
+        size = (
+            max(4, int(round(base_img.shape[1] * scale))),
+            max(4, int(round(base_img.shape[0] * scale))),
+        )
+        img = cv2.resize(base_img, size, interpolation=cv2.INTER_AREA)
+        mask = (
+            cv2.resize(base_mask, size, interpolation=cv2.INTER_AREA)
+            > 0.5
+        ).astype(np.float32)
+    # Re-zero-mean: resizing perturbs the masked mean.
+    m = mask > 0
+    if not m.any():
+        m = np.ones_like(mask, dtype=bool)
+        mask = m.astype(np.float32)
+    img[m] -= float(img[m].mean())
+    img[~m] = 0.0
+    return CursorTemplate(
+        name=name,
+        image=img,
+        mask=mask,
+        hotspot_px=(base_hotspot[0] * scale, base_hotspot[1] * scale),
+    )
+
+
+def hand_cursor_templates() -> list[CursorTemplate]:
+    if not _HAND_NPZ.exists():
+        return []
+    d = np.load(_HAND_NPZ)
+    base_img = d["image"].astype(np.float32)
+    base_mask = d["mask"].astype(np.float32)
+    hx, hy = (float(v) for v in d["hotspot"])
+    return [
+        _rescale_template(
+            base_img, base_mask, (hx, hy), s,
+            f"macos-hand-{int(round(base_img.shape[0] * s))}",
+        )
+        for s in HAND_SCALES
+    ]
+
+
 _CACHE: list[CursorTemplate] | None = None
 
 
@@ -108,4 +175,5 @@ def stock_cursor_templates() -> list[CursorTemplate]:
     global _CACHE
     if _CACHE is None:
         _CACHE = [render_arrow_template(h) for h in DEFAULT_HEIGHTS_PX]
+        _CACHE.extend(hand_cursor_templates())
     return _CACHE

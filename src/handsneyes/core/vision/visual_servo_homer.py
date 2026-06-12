@@ -1482,6 +1482,14 @@ class VisualServoHomer:
         # close a 30 % bulk miss within the iteration budget.
         CORRECTION_HID_CLAMP = 400      # diff-measured iteration
         TRUSTED_HID_CLAMP = 2500        # template-verified iteration
+        # A template hit below this score is still a usable position
+        # estimate but NOT trust-worthy: live remote-mac testing
+        # caught a 0.41-score arrow match locking onto static sidebar
+        # text (the real cursor was the hand) and committing 24 px
+        # off. Real-cursor hits score ≥0.55 in practice.
+        TRUSTED_MIN_SCORE = float(
+            os.environ.get("HANDSNEYES_CURSOR_TPL_TRUST", "0.55"),
+        )
         # Two consecutive measurements within this distance, while
         # bursts were actually sent, mean the localizer is reading a
         # static phantom (e.g. the previous click's focus highlight),
@@ -1492,6 +1500,7 @@ class VisualServoHomer:
         prev_hotspot: tuple[float, float] | None = None
         last_burst_pct = 0.0
         diff_disabled = False
+        tpl_disabled = False
         rolling_ref = None  # previous iteration's frame
         predicted: tuple[float, float] | None = None
         for it in range(MAX_CORRECTIONS):
@@ -1534,7 +1543,7 @@ class VisualServoHomer:
             # background animation that poisons the diff. Search
             # around the diff result when available, else the open-
             # loop predicted landing point.
-            if post_bulk is not None:
+            if post_bulk is not None and not tpl_disabled:
                 tpl_hotspot = self._locate_hotspot_by_template(
                     post_bulk,
                     near_pct=(
@@ -1543,11 +1552,11 @@ class VisualServoHomer:
                 )
             if measured is None and tpl_hotspot is None:
                 # Oscillation fallback: on the first iteration (no
-                # diff signal at all) or once diff has been disabled
-                # as a phantom (then it's the only locator left when
-                # the template misses, e.g. cursor became an I-beam
-                # over a text area).
-                if it == 0 or diff_disabled:
+                # diff signal at all) or once a locator has been
+                # disabled as wedged (then oscillation may be the
+                # only one left, e.g. cursor became an I-beam over
+                # a text area).
+                if it == 0 or diff_disabled or tpl_disabled:
                     try:
                         measured = await self._find_cursor_via_oscillation(
                             run_dir, label="openloop_post_bulk",
@@ -1574,16 +1583,21 @@ class VisualServoHomer:
                 # compute the residual against the operator's intended
                 # click point in hotspot-space.
                 hotspot_pct = (measured[0] - hot_x, measured[1] - hot_y)
-            trusted = tpl_hotspot is not None
+            # Trusted = template hit with a solid score. Marginal
+            # hits (0.40-0.55) still localize but get the cautious
+            # clamp and phantom-style wedge handling.
+            trusted = (
+                tpl_hotspot is not None
+                and tpl_hotspot[2] >= TRUSTED_MIN_SCORE
+            )
 
             # Wedge detection: the reading barely moved although the
-            # last burst should have moved the cursor much further. A
-            # diff reading that ignores bursts is a static phantom
-            # (previous click's focus highlight, caret, repaint) —
-            # drop diff for the rest of this click and re-localize
-            # via template/oscillation. A wedged TRUSTED reading
-            # means the cursor truly isn't moving (HID path dead?) —
-            # bursting more won't help.
+            # last burst should have moved the cursor much further —
+            # whatever produced it is locked onto STATIC content
+            # (focus highlight, caret, an arrow-shaped glyph), not
+            # the cursor. Disable that locator for the rest of the
+            # click and let the others take over; only commit when
+            # every locator has wedged.
             observed_move = (
                 math.hypot(
                     hotspot_pct[0] - prev_hotspot[0],
@@ -1597,14 +1611,21 @@ class VisualServoHomer:
                     WEDGE_EPS_PCT, 0.25 * last_burst_pct,
                 )
             ):
-                if not trusted and not diff_disabled:
+                src = "template" if tpl_hotspot is not None else "diff"
+                wedge_handled = False
+                if tpl_hotspot is not None and not tpl_disabled:
+                    tpl_disabled = True
+                    wedge_handled = True
+                elif tpl_hotspot is None and not diff_disabled:
                     diff_disabled = True
+                    wedge_handled = True
+                if wedge_handled:
                     print(
                         f"  Iter {it}: reading at "
                         f"({hotspot_pct[0]:.2%},{hotspot_pct[1]:.2%}) "
                         f"moved {observed_move:.2%} for a "
-                        f"{last_burst_pct:.2%} burst — diff phantom, "
-                        f"disabling diff localize"
+                        f"{last_burst_pct:.2%} burst — {src} locked "
+                        f"on static content, disabling it"
                     )
                     prev_hotspot = hotspot_pct
                     continue

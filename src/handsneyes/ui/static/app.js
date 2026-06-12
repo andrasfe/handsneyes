@@ -177,6 +177,7 @@ const $frameBusyLabel = $frameBusy
   ? $frameBusy.querySelector(".frame-busy-label")
   : null;
 const $optClickToMove = document.getElementById("opt-click-to-move");
+const $optAnchorClick = document.getElementById("opt-anchor-click");
 const $btnMouseLeft = document.getElementById("btn-mouse-left");
 const $btnMouseMiddle = document.getElementById("btn-mouse-middle");
 const $btnMouseRight = document.getElementById("btn-mouse-right");
@@ -1857,7 +1858,10 @@ async function _fireHomingClick(x_pct, y_pct, clientX, clientY) {
   );
   await postMouse(
     "/api/mouse/click_at",
-    { x_pct, y_pct, button: "left" },
+    {
+      x_pct, y_pct, button: "left",
+      anchor: !!($optAnchorClick && $optAnchorClick.checked),
+    },
     "homing cursor…",
   );
   state.hadClickAt = true;

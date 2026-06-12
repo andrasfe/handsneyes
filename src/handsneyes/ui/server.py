@@ -150,6 +150,15 @@ class MouseClickAtRequest(BaseModel):
     # we send (count - 1) extra in-place clicks after the home is
     # reported successful.
     count: int = Field(default=1, ge=1, le=3)
+    # Anchored click: the coordinates were picked on a possibly-STALE
+    # frame (the cc screenshot). When true, OCR the word under the
+    # click point in the last stored frame, re-find that word in a
+    # fresh capture, and click where it is NOW. Defeats list reflow
+    # (Slack reorders its sidebar after every selection change, so
+    # raw coordinates from a stale frame select whatever scrolled
+    # into them). Falls back to the raw coordinates when OCR can't
+    # anchor.
+    anchor: bool = Field(default=False)
     # Optional overrides; defaults come from settings.commander.
     screen_width: int | None = Field(default=None, gt=0)
     screen_height: int | None = Field(default=None, gt=0)
@@ -335,6 +344,133 @@ def _sse(event: str | None, data: Any) -> bytes:
     out.append("")
     out.append("")
     return ("\n".join(out)).encode()
+
+
+def _ocr_word_at(
+    frame_bgr, x_pct: float, y_pct: float,
+) -> tuple[str, tuple[float, float]] | None:
+    """The OCR word under (or nearest, horizontally, to) a click
+    point. Scans a thin horizontal band around the point at 3× scale
+    in both polarities (UI text is usually light-on-dark). Returns
+    ``(word, word_centre_pct)`` or ``None``."""
+    try:
+        import cv2
+        import numpy as np
+        import pytesseract
+    except Exception:
+        return None
+    h, w = frame_bgr.shape[:2]
+    bx0 = max(0, int((x_pct - 0.14) * w))
+    bx1 = min(w, int((x_pct + 0.14) * w))
+    by0 = max(0, int((y_pct - 0.022) * h))
+    by1 = min(h, int((y_pct + 0.022) * h))
+    if bx1 - bx0 < 20 or by1 - by0 < 8:
+        return None
+    band = cv2.cvtColor(frame_bgr[by0:by1, bx0:bx1], cv2.COLOR_BGR2GRAY)
+    band = cv2.resize(
+        band, (band.shape[1] * 3, band.shape[0] * 3),
+        interpolation=cv2.INTER_CUBIC,
+    )
+    click_x_band = (x_pct * w - bx0) * 3
+    best: tuple[str, tuple[float, float]] | None = None
+    best_dx = float("inf")
+    for invert in (True, False):
+        img = cv2.bitwise_not(band) if invert else band
+        try:
+            # psm 6 (uniform block), not 7: on a thin UI band psm 7
+            # frequently returns nothing at all.
+            data = pytesseract.image_to_data(
+                img, config="--psm 6",
+                output_type=pytesseract.Output.DICT,
+            )
+        except Exception:
+            continue
+        for i, word in enumerate(data["text"]):
+            word = (word or "").strip()
+            if len(word) < 3:
+                continue
+            try:
+                conf = float(data["conf"][i])
+            except Exception:
+                conf = -1.0
+            if conf < 40:
+                continue
+            wx = data["left"][i] + data["width"][i] / 2.0
+            wy = data["top"][i] + data["height"][i] / 2.0
+            # Containment beats proximity; ties broken by distance
+            # from the click x to the word centre.
+            inside = (
+                data["left"][i] <= click_x_band
+                <= data["left"][i] + data["width"][i]
+            )
+            dx = 0.0 if inside else abs(wx - click_x_band)
+            if dx < best_dx:
+                best_dx = dx
+                best = (
+                    word,
+                    (
+                        (bx0 + wx / 3.0) / w,
+                        (by0 + wy / 3.0) / h,
+                    ),
+                )
+        if best is not None and best_dx == 0.0:
+            break
+    return best
+
+
+async def _resolve_anchor(
+    store: FrameStore, ctx, x_pct: float, y_pct: float,
+) -> tuple[float, float, str | None]:
+    """Re-locate a stale-frame click point in a fresh capture.
+
+    Returns the (possibly adjusted) click coordinates plus a note for
+    the log. Never raises — any failure falls back to the raw
+    coordinates, which is exactly today's behaviour."""
+    from handsneyes.core.vision.ocr_finder import find_text, have_ocr
+    if not have_ocr() or getattr(ctx, "capture", None) is None:
+        return x_pct, y_pct, None
+    try:
+        import cv2
+        meta = store.latest()
+        if meta is None:
+            return x_pct, y_pct, None
+        ref = cv2.imread(str(meta.path))
+        if ref is None:
+            return x_pct, y_pct, None
+        word = _ocr_word_at(ref, x_pct, y_pct)
+        if word is None:
+            return x_pct, y_pct, "anchor: no word under click"
+        text, (wx, wy) = word
+        fresh = (await ctx.capture.capture_frame()).image
+        region = (
+            max(0.0, x_pct - 0.20), max(0.0, y_pct - 0.20),
+            min(1.0, x_pct + 0.20), min(1.0, y_pct + 0.20),
+        )
+        hits = find_text(fresh, [text], crops=[region])
+        best, best_d = None, 0.25
+        import math as _math
+        for hit in hits:
+            d = _math.hypot(hit.x_pct - wx, hit.y_pct - wy)
+            if d < best_d:
+                best, best_d = hit, d
+        if best is None:
+            return (
+                x_pct, y_pct,
+                f"anchor: {text!r} not re-found — raw coords",
+            )
+        # Preserve the operator's offset relative to the word.
+        nx = min(1.0, max(0.0, best.x_pct + (x_pct - wx)))
+        ny = min(1.0, max(0.0, best.y_pct + (y_pct - wy)))
+        moved = _math.hypot(nx - x_pct, ny - y_pct)
+        if moved < 0.002:
+            return x_pct, y_pct, f"anchor: {text!r} unmoved"
+        return (
+            nx, ny,
+            f"anchor: {text!r} moved {moved:.1%} — retargeting",
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("anchor resolve failed: %s", e)
+        return x_pct, y_pct, None
 
 
 def _homer_calibration_path(target_name: str) -> Path:
@@ -1220,6 +1356,18 @@ def create_app(
                 raise HTTPException(502, f"context_factory failed: {e}")
 
             try:
+                # Anchored click: re-locate the operator's (possibly
+                # stale-frame) click point in a fresh capture before
+                # homing. See MouseClickAtRequest.anchor.
+                aim_x, aim_y = req.x_pct, req.y_pct
+                if req.anchor:
+                    aim_x, aim_y, note = await _resolve_anchor(
+                        store, ctx, req.x_pct, req.y_pct,
+                    )
+                    if note:
+                        logger.info("click_at %s", note)
+                        print(f"  {note}")
+
                 adapter = _SessionAdapter(ctx)
                 homer = VisualServoHomer(session=adapter)
                 # No-slam follow-up: if a click landed recently, the
@@ -1287,7 +1435,7 @@ def create_app(
                         homer._pct_per_hid_openloop_x = payload[6]
                         homer._pct_per_hid_openloop_y = payload[7]
                 outcome = await homer.home_to_pixel(
-                    req.x_pct, req.y_pct, button=req.button,
+                    aim_x, aim_y, button=req.button,
                     prev_cursor_pct=prev_cursor_pct,
                     click_count=req.count,
                 )
@@ -1297,9 +1445,9 @@ def create_app(
                 # home, AND the no-slam cache so the next click_at
                 # within the TTL skips the slam phase entirely.
                 if bool(outcome.clicked):
-                    app.state.last_scroll_home_xy = (req.x_pct, req.y_pct)
+                    app.state.last_scroll_home_xy = (aim_x, aim_y)
                     app.state.last_click_xy_at = (
-                        (req.x_pct, req.y_pct), _time.time(),
+                        (aim_x, aim_y), _time.time(),
                     )
                     # Persist the homer's converged pct-per-HID
                     # ratios (both closed-loop AND fast-cruise) so
@@ -1381,8 +1529,8 @@ def create_app(
 
                     img = frame.image
                     h_img, w_img = img.shape[:2]
-                    aim_px_x = int(req.x_pct * w_img)
-                    aim_px_y = int(req.y_pct * h_img)
+                    aim_px_x = int(aim_x * w_img)
+                    aim_px_y = int(aim_y * h_img)
                     final = outcome.final_cursor_pct
                     final_px = (
                         (int(final[0] * w_img), int(final[1] * h_img))
@@ -1421,7 +1569,7 @@ def create_app(
                     sidecar = {
                         "ts": ts,
                         "frame_size": [w_img, h_img],
-                        "intended_click_pct": [req.x_pct, req.y_pct],
+                        "intended_click_pct": [aim_x, aim_y],
                         "intended_click_px": [aim_px_x, aim_px_y],
                         "homer_final_cursor_pct": (
                             list(final) if final is not None else None
@@ -1442,7 +1590,7 @@ def create_app(
                     "ok": bool(outcome.clicked),
                     "reason": outcome.reason,
                     "steps": outcome.steps,
-                    "x_pct": req.x_pct, "y_pct": req.y_pct,
+                    "x_pct": aim_x, "y_pct": aim_y,
                     "button": req.button,
                     "count": req.count,
                 })
