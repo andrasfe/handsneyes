@@ -1473,12 +1473,27 @@ class VisualServoHomer:
         hot_x, hot_y = self._hotspot_offset_pct()
 
         CLICK_TOL_OPENLOOP = 0.004      # 0.4 % ≈ 8 px on 1920w
-        MAX_CORRECTIONS = 4
+        MAX_CORRECTIONS = 8
         # Clamp per axis so a single mis-localize can't fling the
-        # cursor across the screen. 400 HID ≈ 8 % at typical ratios.
-        CORRECTION_HID_CLAMP = 400
+        # cursor across the screen. The cautious clamp guards DIFF
+        # measurements (phantom-prone); a template-verified hotspot
+        # is trusted with much bigger bursts — at remote-mac ratios
+        # (~0.12‰/HID) 400 HID is only ~5 % of screen, which cannot
+        # close a 30 % bulk miss within the iteration budget.
+        CORRECTION_HID_CLAMP = 400      # diff-measured iteration
+        TRUSTED_HID_CLAMP = 2500        # template-verified iteration
+        # Two consecutive measurements within this distance, while
+        # bursts were actually sent, mean the localizer is reading a
+        # static phantom (e.g. the previous click's focus highlight),
+        # not the cursor.
+        WEDGE_EPS_PCT = 0.004
 
         last_residual = None
+        prev_hotspot: tuple[float, float] | None = None
+        last_burst_pct = 0.0
+        diff_disabled = False
+        rolling_ref = None  # previous iteration's frame
+        predicted: tuple[float, float] | None = None
         for it in range(MAX_CORRECTIONS):
             if pre_bulk is None and not self._stock_templates:
                 break  # no pre-frame to diff against, no templates
@@ -1488,16 +1503,32 @@ class VisualServoHomer:
                 post_bulk = await self._capture_gray()
             except Exception:
                 post_bulk = None
-            if post_bulk is not None and pre_bulk is not None:
-                try:
-                    hit = self._detect_cursor_in_roi(
-                        pre_bulk, post_bulk,
-                        (0.0, 0.0, 1.0, 1.0),
-                        near_pct=target_aim,
-                    )
-                    measured = hit[0] if hit is not None else None
-                except Exception:
-                    measured = None
+            if post_bulk is not None and not diff_disabled:
+                # Iteration 0 diffs against the pre-bulk frame (max
+                # signal: the cursor crossed the whole bulk distance).
+                # Later iterations diff against the PREVIOUS
+                # iteration's frame and elect by the predicted post-
+                # burst position: UI changes from earlier in the run
+                # exist in both frames and cancel, where a stale
+                # pre-bulk reference accumulates phantoms (focus
+                # highlights, carets) that out-compete the real blob.
+                if it == 0 or rolling_ref is None:
+                    ref, near = pre_bulk, target_aim
+                else:
+                    ref = rolling_ref
+                    near = predicted if predicted is not None else target_aim
+                if ref is not None:
+                    try:
+                        hit = self._detect_cursor_in_roi(
+                            ref, post_bulk,
+                            (0.0, 0.0, 1.0, 1.0),
+                            near_pct=near,
+                        )
+                        measured = hit[0] if hit is not None else None
+                    except Exception:
+                        measured = None
+            if post_bulk is not None:
+                rolling_ref = post_bulk
             # Stock-template hotspot fix: pixel-precise, independent
             # of the diff's centroid + offset estimate, and immune to
             # background animation that poisons the diff. Search
@@ -1511,10 +1542,12 @@ class VisualServoHomer:
                     ),
                 )
             if measured is None and tpl_hotspot is None:
-                # First iteration only: try oscillation as a one-time
-                # fallback (slow — leaves cursor moved — so only do it
-                # when we have no diff signal at all).
-                if it == 0:
+                # Oscillation fallback: on the first iteration (no
+                # diff signal at all) or once diff has been disabled
+                # as a phantom (then it's the only locator left when
+                # the template misses, e.g. cursor became an I-beam
+                # over a text area).
+                if it == 0 or diff_disabled:
                     try:
                         measured = await self._find_cursor_via_oscillation(
                             run_dir, label="openloop_post_bulk",
@@ -1541,6 +1574,47 @@ class VisualServoHomer:
                 # compute the residual against the operator's intended
                 # click point in hotspot-space.
                 hotspot_pct = (measured[0] - hot_x, measured[1] - hot_y)
+            trusted = tpl_hotspot is not None
+
+            # Wedge detection: the reading barely moved although the
+            # last burst should have moved the cursor much further. A
+            # diff reading that ignores bursts is a static phantom
+            # (previous click's focus highlight, caret, repaint) —
+            # drop diff for the rest of this click and re-localize
+            # via template/oscillation. A wedged TRUSTED reading
+            # means the cursor truly isn't moving (HID path dead?) —
+            # bursting more won't help.
+            observed_move = (
+                math.hypot(
+                    hotspot_pct[0] - prev_hotspot[0],
+                    hotspot_pct[1] - prev_hotspot[1],
+                ) if prev_hotspot is not None else None
+            )
+            if (
+                observed_move is not None
+                and last_burst_pct >= 0.012
+                and observed_move < max(
+                    WEDGE_EPS_PCT, 0.25 * last_burst_pct,
+                )
+            ):
+                if not trusted and not diff_disabled:
+                    diff_disabled = True
+                    print(
+                        f"  Iter {it}: reading at "
+                        f"({hotspot_pct[0]:.2%},{hotspot_pct[1]:.2%}) "
+                        f"moved {observed_move:.2%} for a "
+                        f"{last_burst_pct:.2%} burst — diff phantom, "
+                        f"disabling diff localize"
+                    )
+                    prev_hotspot = hotspot_pct
+                    continue
+                print(
+                    f"  Iter {it}: cursor not moving despite bursts — "
+                    f"committing"
+                )
+                break
+            prev_hotspot = hotspot_pct
+
             cursor_img = hotspot_pct
             dx_pct = target_aim[0] - hotspot_pct[0]
             dy_pct = target_aim[1] - hotspot_pct[1]
@@ -1555,10 +1629,11 @@ class VisualServoHomer:
                 )
                 break
 
+            clamp = TRUSTED_HID_CLAMP if trusted else CORRECTION_HID_CLAMP
             hid_dx = int(dx_pct / rx)
             hid_dy = int(dy_pct / ry)
-            hid_dx = max(-CORRECTION_HID_CLAMP, min(CORRECTION_HID_CLAMP, hid_dx))
-            hid_dy = max(-CORRECTION_HID_CLAMP, min(CORRECTION_HID_CLAMP, hid_dy))
+            hid_dx = max(-clamp, min(clamp, hid_dx))
+            hid_dy = max(-clamp, min(clamp, hid_dy))
             if hid_dx == 0 and hid_dy == 0:
                 # Residual is non-zero but below 1 HID; can't reduce
                 # further. Accept.
@@ -1571,6 +1646,12 @@ class VisualServoHomer:
                 f"  Iter {it}: hotspot=({hotspot_pct[0]:.2%},"
                 f"{hotspot_pct[1]:.2%}) residual={residual:.2%} → "
                 f"hid=({hid_dx:+d},{hid_dy:+d})"
+                f"{' [trusted]' if trusted else ''}"
+            )
+            last_burst_pct = math.hypot(hid_dx * rx, hid_dy * ry)
+            predicted = (
+                hotspot_pct[0] + hid_dx * rx,
+                hotspot_pct[1] + hid_dy * ry,
             )
             await self._send_hid(hid_dx, hid_dy)
             await asyncio.sleep(0.18)

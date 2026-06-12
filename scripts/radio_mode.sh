@@ -14,8 +14,17 @@
 
 set -euo pipefail
 
+# systemd units run with a minimal PATH that misses /usr/sbin —
+# where rfkill lives. Without this, the bt_mode_live() check fails
+# silently and `apply` cycles bluetoothd on EVERY service start.
+PATH="/usr/sbin:/sbin:$PATH"
+
 MODE_FILE="/home/andras/handsneyes/.radio-mode"
-DEFAULT_MODE="wifi"
+# BT is the product (the rig exists to serve BT HID); wifi is the
+# maintenance mode. Defaulting to wifi once caused a silent post-
+# reboot outage: boot applied wifi, the BT radio stayed down, and
+# the target Mac's Connect clicks had nothing to talk to.
+DEFAULT_MODE="bt"
 
 get_saved_mode() {
     if [ -f "$MODE_FILE" ]; then
@@ -58,6 +67,16 @@ set_bt_mode() {
     echo "  Bluetooth: enabled + discoverable"
 }
 
+bt_mode_live() {
+    rfkill list bluetooth 2>/dev/null | grep -q "Soft blocked: no" \
+        && hciconfig hci0 2>/dev/null | grep -q "UP RUNNING"
+}
+
+wifi_mode_live() {
+    rfkill list wifi 2>/dev/null | grep -q "Soft blocked: no" \
+        && ! hciconfig hci0 2>/dev/null | grep -q "UP RUNNING"
+}
+
 show_status() {
     local saved_mode
     saved_mode=$(get_saved_mode)
@@ -85,11 +104,31 @@ case "${1:-status}" in
         echo "Reboot to fully apply, or mode is active now."
         ;;
     apply)
+        # Boot/service-start path — must be IDEMPOTENT. set_bt_mode
+        # restarts bluetoothd, and bluetoothd restarts trigger a
+        # gateway restart (bluetooth.service.d/restart-hid-gateway
+        # drop-in re-registers the HID profile). If apply cycled
+        # bluetooth unconditionally, every gateway start would kill
+        # itself through that hook.
         mode=$(get_saved_mode)
         echo "Applying saved radio mode: $mode"
         case "$mode" in
-            bt)  set_bt_mode ;;
-            *)   set_wifi_mode ;;
+            bt)
+                if bt_mode_live; then
+                    # Cheap non-disruptive re-asserts only.
+                    hciconfig hci0 piscan 2>/dev/null || true
+                    echo "BT mode already live — radios left as is."
+                else
+                    set_bt_mode
+                fi
+                ;;
+            *)
+                if wifi_mode_live; then
+                    echo "WiFi mode already live — radios left as is."
+                else
+                    set_wifi_mode
+                fi
+                ;;
         esac
         ;;
     status)
