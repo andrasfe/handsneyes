@@ -65,3 +65,4 @@ captured_frames/
 data/ml/
 !src/handsneyes/platforms/*/models/
 *.safetensors
+.playwright-mcp/
