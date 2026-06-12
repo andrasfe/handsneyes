@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# radio_mode.sh — Switch Pi Zero 2 W between WiFi and Bluetooth modes.
+#
+# The BCM43436s has a shared radio — WiFi and BT Classic can't coexist
+# reliably. This script toggles between modes and persists the choice.
+#
+# SSH over USB ECM (10.0.0.2) is always available regardless of mode.
+#
+# Usage:
+#   sudo bash scripts/radio_mode.sh wifi    # Enable WiFi, disable BT
+#   sudo bash scripts/radio_mode.sh bt      # Enable BT, disable WiFi
+#   sudo bash scripts/radio_mode.sh apply   # Apply saved mode (for boot)
+#   bash scripts/radio_mode.sh status       # Show current state
+
+set -euo pipefail
+
+MODE_FILE="/home/andras/handsneyes/.radio-mode"
+DEFAULT_MODE="wifi"
+
+get_saved_mode() {
+    if [ -f "$MODE_FILE" ]; then
+        cat "$MODE_FILE"
+    else
+        echo "$DEFAULT_MODE"
+    fi
+}
+
+save_mode() {
+    echo "$1" > "$MODE_FILE"
+}
+
+set_wifi_mode() {
+    echo "Switching to WiFi mode (BT disabled)..."
+    rfkill block bluetooth 2>/dev/null || true
+    rfkill unblock wifi 2>/dev/null || true
+    sleep 1
+    nmcli radio wifi on 2>/dev/null || true
+    nmcli connection up home-wifi 2>/dev/null || true
+    save_mode "wifi"
+    echo "  WiFi: enabled"
+    echo "  Bluetooth: disabled"
+}
+
+set_bt_mode() {
+    echo "Switching to Bluetooth mode (WiFi disabled)..."
+    nmcli radio wifi off 2>/dev/null || true
+    rfkill block wifi 2>/dev/null || true
+    rfkill unblock bluetooth 2>/dev/null || true
+    sleep 1
+    systemctl restart bluetooth 2>/dev/null || true
+    sleep 1
+    # Power on adapter and make discoverable
+    hciconfig hci0 up 2>/dev/null || true
+    hciconfig hci0 class 0x0025C0 2>/dev/null || true
+    hciconfig hci0 piscan 2>/dev/null || true
+    save_mode "bt"
+    echo "  WiFi: disabled"
+    echo "  Bluetooth: enabled + discoverable"
+}
+
+show_status() {
+    local saved_mode
+    saved_mode=$(get_saved_mode)
+    echo "Saved mode: $saved_mode"
+    echo ""
+    echo "rfkill state:"
+    rfkill list 2>/dev/null || echo "  (rfkill not available)"
+    echo ""
+    echo "WiFi:"
+    nmcli -t -f DEVICE,STATE device status 2>/dev/null | grep wlan0 || echo "  not available"
+    echo ""
+    echo "Bluetooth:"
+    hciconfig hci0 2>/dev/null || echo "  not available"
+}
+
+case "${1:-status}" in
+    wifi)
+        set_wifi_mode
+        echo ""
+        echo "Reboot to fully apply, or mode is active now."
+        ;;
+    bt)
+        set_bt_mode
+        echo ""
+        echo "Reboot to fully apply, or mode is active now."
+        ;;
+    apply)
+        mode=$(get_saved_mode)
+        echo "Applying saved radio mode: $mode"
+        case "$mode" in
+            bt)  set_bt_mode ;;
+            *)   set_wifi_mode ;;
+        esac
+        ;;
+    status)
+        show_status
+        ;;
+    *)
+        echo "Usage: $0 [wifi|bt|apply|status]" >&2
+        exit 1
+        ;;
+esac

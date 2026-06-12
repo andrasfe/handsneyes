@@ -1,0 +1,28 @@
+# handsneyes-pi.service — Systemd unit for the Pi keyboard REST API.
+#
+# This is a TEMPLATE. The deploy_pi.sh script generates the actual
+# service file with the correct paths for the target user.
+#
+# Manual install:
+#   sudo cp scripts/handsneyes-pi.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable handsneyes-pi
+
+[Unit]
+Description=Handsneyes Pi Keyboard REST API
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/andras/handsneyes
+ExecStartPre=/bin/bash /home/andras/handsneyes/scripts/setup_usb_gadget.sh ecm
+ExecStartPre=/bin/bash /home/andras/handsneyes/scripts/radio_mode.sh apply
+ExecStart=/home/andras/handsneyes/.venv/bin/handsneyes-pi
+Restart=on-failure
+RestartSec=5
+Environment=PATH=/home/andras/handsneyes/.venv/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target
