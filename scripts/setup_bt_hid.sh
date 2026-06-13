@@ -157,6 +157,12 @@ Class = 0x0025C0
 DiscoverableTimeout = 0
 PairableTimeout = 0
 Discoverable = true
+# FastConnectable keeps the adapter in fast page-scan mode so the
+# host (Mac) re-pages and reconnects within a second or two when it
+# comes back into range, instead of after the default slow-scan
+# interval. Pairs with the SDP HIDNormallyConnectable flag (bt_hid.py)
+# to make devmouse auto-reconnect like a real BT mouse.
+FastConnectable = true
 # Pairable is NOT a valid main.conf key in BlueZ 5.82 — bluetoothd
 # warns "Unknown key Pairable for group General" and ignores it.
 # The correct path is bluetoothctl `pairable on` at runtime, which

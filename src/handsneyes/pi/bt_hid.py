@@ -218,6 +218,15 @@ SDP_RECORD_XML = """<?xml version="1.0" encoding="UTF-8" ?>
   <attribute id="0x020C"> <!-- HIDSupervisionTimeout -->
     <uint16 value="0x0C80" />
   </attribute>
+  <attribute id="0x020D"> <!-- HIDNormallyConnectable -->
+    <!-- CRITICAL for macOS auto-reconnect. When true, the host (Mac)
+         knows this device is always in page-scan mode and can initiate
+         the HID L2CAP channels itself when it detects the Pi nearby —
+         exactly what a Logitech BT mouse does. Without this the Mac
+         waits for the Pi to initiate, but macOS blocks Pi-initiated HID
+         L2CAP (the "BR/EDR up but HID not" deadlock in the watchdog). -->
+    <boolean value="true" />
+  </attribute>
   <attribute id="0x020E"> <!-- HIDBootDevice -->
     <boolean value="true" />
   </attribute>
