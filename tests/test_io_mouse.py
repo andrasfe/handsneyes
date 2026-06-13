@@ -1,12 +1,12 @@
-"""Tests for handsneyes.io.mouse base + HTTP backend.
+"""Tests for handsneyes.io.mouse base + the afferent-backed HTTP backend.
 
-Ported from terminaleyes/tests/unit/test_mouse/test_http_backend.py
-plus the abstract-base-class instantiation check required by ha-006.
+The backend is now a thin async adapter over afferent.GatewayClient — these
+tests mock the client and assert each method delegates with the right args,
+host routing flows through, and lifecycle/error behaviour holds.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
-import httpx
 import pytest
 
 from handsneyes.io.mouse import HttpMouseOutput, MouseOutput
@@ -18,151 +18,104 @@ def test_base_is_abstract() -> None:
         MouseOutput()  # type: ignore[abstract]
 
 
-@pytest.fixture
-def mock_client() -> AsyncMock:
-    return AsyncMock(spec=httpx.AsyncClient)
+def _mouse(**kw) -> "tuple[HttpMouseOutput, MagicMock]":
+    """A backend with its GatewayClient swapped for a MagicMock."""
+    m = HttpMouseOutput(**kw)
+    gw = MagicMock()
+    m._gw = gw
+    return m, gw
 
 
 class TestInit:
     def test_defaults(self) -> None:
         mouse = HttpMouseOutput()
-        assert mouse._base_url == "http://10.0.0.2:8080"
-        assert mouse._transport == "bt"
-        assert mouse._prefix == "/bt/mouse"
+        assert mouse._gw.base_url == "http://10.0.0.2:8080"
 
-    def test_usb_transport(self) -> None:
-        mouse = HttpMouseOutput(transport="usb")
-        assert mouse._prefix == "/mouse"
+    def test_usb_transport_rejected(self) -> None:
+        with pytest.raises(MouseOutputError):
+            HttpMouseOutput(transport="usb")
 
     def test_custom_base_url(self) -> None:
         mouse = HttpMouseOutput(base_url="http://192.168.1.100:9090/")
-        assert mouse._base_url == "http://192.168.1.100:9090"
+        assert mouse._gw.base_url == "http://192.168.1.100:9090"
+
+    def test_host_mac_routes(self) -> None:
+        mouse = HttpMouseOutput(host_mac="aa:bb:cc:dd:ee:ff")
+        assert mouse._gw.host_mac == "AA:BB:CC:DD:EE:FF"
 
 
 class TestConnect:
     @pytest.mark.asyncio
     async def test_connect_success(self) -> None:
-        mouse = HttpMouseOutput()
-        with patch("handsneyes.io.mouse.backends.http.httpx.AsyncClient") as mock_cls:
-            mock_instance = AsyncMock()
-            mock_response = MagicMock()
-            mock_response.raise_for_status = MagicMock()
-            mock_instance.get = AsyncMock(return_value=mock_response)
-            mock_cls.return_value = mock_instance
+        mouse, gw = _mouse()
+        gw.is_hid_up.return_value = True
+        await mouse.connect()
+        gw.is_hid_up.assert_called_once()
+        assert mouse._connected is True
 
+    @pytest.mark.asyncio
+    async def test_connect_failure_when_hid_down(self) -> None:
+        mouse, gw = _mouse()
+        gw.is_hid_up.return_value = False
+        with pytest.raises(MouseOutputError):
             await mouse.connect()
-            mock_instance.get.assert_called_once_with("/health")
-            assert mouse._client is not None
 
+
+class TestActions:
     @pytest.mark.asyncio
-    async def test_connect_failure(self) -> None:
-        mouse = HttpMouseOutput()
-        with patch("handsneyes.io.mouse.backends.http.httpx.AsyncClient") as mock_cls:
-            mock_instance = AsyncMock()
-            mock_instance.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
-            mock_cls.return_value = mock_instance
-
-            with pytest.raises(MouseOutputError, match="Failed to connect"):
-                await mouse.connect()
-            assert mouse._client is None
-
-
-class TestMove:
-    @pytest.mark.asyncio
-    async def test_http_backend_move_via_post(self, mock_client: AsyncMock) -> None:
-        mouse = HttpMouseOutput()
-        mouse._client = mock_client
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-
+    async def test_move(self) -> None:
+        mouse, gw = _mouse()
         await mouse.move(10, -5)
-        mock_client.post.assert_called_once_with(
-            "/bt/mouse/move", json={"x": 10, "y": -5}
-        )
+        gw.move.assert_called_once_with(10, -5)
 
     @pytest.mark.asyncio
-    async def test_move_usb_transport(self, mock_client: AsyncMock) -> None:
-        mouse = HttpMouseOutput(transport="usb")
-        mouse._client = mock_client
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
+    async def test_move_large(self) -> None:
+        mouse, gw = _mouse()
+        await mouse.move_large(2000, -1500)
+        gw.move_large.assert_called_once_with(2000, -1500)
 
-        await mouse.move(50, 50)
-        mock_client.post.assert_called_once_with(
-            "/mouse/move", json={"x": 50, "y": 50}
-        )
-
-
-class TestClick:
     @pytest.mark.asyncio
-    async def test_http_backend_click_left_button(self, mock_client: AsyncMock) -> None:
-        mouse = HttpMouseOutput()
-        mouse._client = mock_client
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-
+    async def test_click_left(self) -> None:
+        mouse, gw = _mouse()
         await mouse.click("left")
-        mock_client.post.assert_called_once_with(
-            "/bt/mouse/click", json={"button": "left", "count": 1}
-        )
+        gw.click.assert_called_once_with("left", 1)
 
     @pytest.mark.asyncio
-    async def test_click_right(self, mock_client: AsyncMock) -> None:
-        mouse = HttpMouseOutput()
-        mouse._client = mock_client
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
+    async def test_click_count(self) -> None:
+        mouse, gw = _mouse()
+        await mouse.click("right", 2)
+        gw.click.assert_called_once_with("right", 2)
 
-        await mouse.click("right")
-        mock_client.post.assert_called_once_with(
-            "/bt/mouse/click", json={"button": "right", "count": 1}
-        )
-
-
-class TestScroll:
     @pytest.mark.asyncio
-    async def test_scroll(self, mock_client: AsyncMock) -> None:
-        mouse = HttpMouseOutput()
-        mouse._client = mock_client
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
+    async def test_press_release(self) -> None:
+        mouse, gw = _mouse()
+        await mouse.press("left")
+        await mouse.release("left")
+        gw.press.assert_called_once_with("left")
+        gw.release.assert_called_once_with("left")
 
+    @pytest.mark.asyncio
+    async def test_scroll(self) -> None:
+        mouse, gw = _mouse()
         await mouse.scroll(-3)
-        mock_client.post.assert_called_once_with(
-            "/bt/mouse/scroll", json={"amount": -3}
-        )
+        gw.scroll.assert_called_once_with(-3)
 
 
-class TestNotConnected:
+class TestErrors:
     @pytest.mark.asyncio
-    async def test_move_not_connected(self) -> None:
-        mouse = HttpMouseOutput()
-        with pytest.raises(MouseOutputError, match="Not connected"):
-            await mouse.move(10, 10)
+    async def test_backend_unavailable_becomes_mouse_error(self) -> None:
+        from afferent import BackendUnavailable
 
-    @pytest.mark.asyncio
-    async def test_click_not_connected(self) -> None:
-        mouse = HttpMouseOutput()
-        with pytest.raises(MouseOutputError, match="Not connected"):
-            await mouse.click()
+        mouse, gw = _mouse()
+        gw.move.side_effect = BackendUnavailable("gateway unreachable")
+        with pytest.raises(MouseOutputError):
+            await mouse.move(1, 0)
 
 
 class TestDisconnect:
     @pytest.mark.asyncio
-    async def test_disconnect(self, mock_client: AsyncMock) -> None:
-        mouse = HttpMouseOutput()
-        mouse._client = mock_client
-
+    async def test_disconnect(self) -> None:
+        mouse, _ = _mouse()
+        mouse._connected = True
         await mouse.disconnect()
-        mock_client.aclose.assert_called_once()
-        assert mouse._client is None
-
-    @pytest.mark.asyncio
-    async def test_disconnect_when_not_connected(self) -> None:
-        mouse = HttpMouseOutput()
-        await mouse.disconnect()
+        assert mouse._connected is False

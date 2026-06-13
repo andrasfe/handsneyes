@@ -1,11 +1,15 @@
-"""Tests for handsneyes.io.keyboard base + HTTP backend."""
+"""Tests for handsneyes.io.keyboard base + the afferent-backed HTTP backend.
+
+The backend is now a thin async adapter over afferent.GatewayClient — these
+tests mock the client and assert delegation, host routing, secret redaction,
+and lifecycle/error behaviour.
+"""
 
 from __future__ import annotations
 
 import logging
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
-import httpx
 import pytest
 
 from handsneyes.io.keyboard import (
@@ -20,141 +24,101 @@ def test_base_is_abstract() -> None:
         KeyboardOutput()  # type: ignore[abstract]
 
 
-@pytest.fixture
-def mock_client() -> AsyncMock:
-    return AsyncMock(spec=httpx.AsyncClient)
+def _kb(**kw) -> "tuple[HttpKeyboardOutput, MagicMock]":
+    k = HttpKeyboardOutput(**kw)
+    gw = MagicMock()
+    k._gw = gw
+    return k, gw
 
 
 class TestInit:
     def test_defaults(self) -> None:
         kb = HttpKeyboardOutput()
-        assert kb._base_url == "http://localhost:8080"
-        assert kb._transport == "usb"
-        assert kb._prefix == ""
+        assert kb._gw.base_url == "http://localhost:8080"
 
-    def test_bt_transport(self) -> None:
-        kb = HttpKeyboardOutput(transport="bt")
-        assert kb._prefix == "/bt"
+    def test_usb_transport_rejected(self) -> None:
+        with pytest.raises(KeyboardOutputError):
+            HttpKeyboardOutput(transport="usb")
 
     def test_custom_base_url_trailing_slash_stripped(self) -> None:
         kb = HttpKeyboardOutput(base_url="http://test/")
-        assert kb._base_url == "http://test"
+        assert kb._gw.base_url == "http://test"
+
+    def test_host_mac_routes(self) -> None:
+        kb = HttpKeyboardOutput(host_mac="aa:bb:cc:dd:ee:ff")
+        assert kb._gw.host_mac == "AA:BB:CC:DD:EE:FF"
 
 
 class TestConnect:
     @pytest.mark.asyncio
     async def test_connect_success(self) -> None:
-        kb = HttpKeyboardOutput()
-        with patch(
-            "handsneyes.io.keyboard.backends.http.httpx.AsyncClient"
-        ) as mock_cls:
-            mock_instance = AsyncMock()
-            mock_response = MagicMock()
-            mock_response.raise_for_status = MagicMock()
-            mock_instance.get = AsyncMock(return_value=mock_response)
-            mock_cls.return_value = mock_instance
-
-            await kb.connect()
-            mock_instance.get.assert_called_once_with("/health")
-            assert kb._client is not None
+        kb, gw = _kb()
+        gw.is_hid_up.return_value = True
+        await kb.connect()
+        gw.is_hid_up.assert_called_once()
+        assert kb._connected is True
 
     @pytest.mark.asyncio
-    async def test_connect_failure(self) -> None:
-        kb = HttpKeyboardOutput()
-        with patch(
-            "handsneyes.io.keyboard.backends.http.httpx.AsyncClient"
-        ) as mock_cls:
-            mock_instance = AsyncMock()
-            mock_instance.get = AsyncMock(
-                side_effect=httpx.ConnectError("refused")
-            )
-            mock_cls.return_value = mock_instance
-
-            with pytest.raises(KeyboardOutputError, match="Failed to connect"):
-                await kb.connect()
-            assert kb._client is None
+    async def test_connect_failure_when_hid_down(self) -> None:
+        kb, gw = _kb()
+        gw.is_hid_up.return_value = False
+        with pytest.raises(KeyboardOutputError):
+            await kb.connect()
 
 
 class TestSend:
     @pytest.mark.asyncio
-    async def test_keystroke_via_post(
-        self, mock_client: AsyncMock
-    ) -> None:
-        kb = HttpKeyboardOutput()
-        kb._client = mock_client
-        mock_client.post = AsyncMock(return_value=MagicMock(
-            raise_for_status=MagicMock()
-        ))
+    async def test_keystroke_delegates(self) -> None:
+        kb, gw = _kb()
         await kb.send_keystroke("Enter")
-        mock_client.post.assert_called_once_with(
-            "/keystroke", json={"key": "Enter"}
-        )
+        gw.keystroke.assert_called_once_with("Enter")
 
     @pytest.mark.asyncio
-    async def test_key_combo_via_post(
-        self, mock_client: AsyncMock
-    ) -> None:
-        kb = HttpKeyboardOutput()
-        kb._client = mock_client
-        mock_client.post = AsyncMock(return_value=MagicMock(
-            raise_for_status=MagicMock()
-        ))
-        await kb.send_key_combo(["ctrl"], "c")
-        mock_client.post.assert_called_once_with(
-            "/key-combo", json={"modifiers": ["ctrl"], "key": "c"}
-        )
+    async def test_key_combo_delegates(self) -> None:
+        kb, gw = _kb()
+        await kb.send_key_combo(["meta"], "c")
+        gw.key_combo.assert_called_once_with(["meta"], "c")
 
     @pytest.mark.asyncio
-    async def test_send_text_via_post(
-        self, mock_client: AsyncMock
-    ) -> None:
-        kb = HttpKeyboardOutput()
-        kb._client = mock_client
-        mock_client.post = AsyncMock(return_value=MagicMock(
-            raise_for_status=MagicMock()
-        ))
+    async def test_send_text_delegates_with_warmup(self) -> None:
+        kb, gw = _kb()
         await kb.send_text("hello")
-        mock_client.post.assert_called_once_with(
-            "/text", json={"text": "hello", "warmup": True}
-        )
+        gw.text.assert_called_once_with("hello", warmup=True)
+
+    @pytest.mark.asyncio
+    async def test_send_text_warmup_false(self) -> None:
+        kb, gw = _kb()
+        await kb.send_text("https://x", warmup=False)
+        gw.text.assert_called_once_with("https://x", warmup=False)
 
     @pytest.mark.asyncio
     async def test_send_text_secret_redacts_logs(
-        self,
-        mock_client: AsyncMock,
-        caplog: pytest.LogCaptureFixture,
+        self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        kb = HttpKeyboardOutput()
-        kb._client = mock_client
-        mock_client.post = AsyncMock(return_value=MagicMock(
-            raise_for_status=MagicMock()
-        ))
+        kb, _ = _kb()
         caplog.set_level(logging.DEBUG, logger="handsneyes.io.keyboard")
         secret = "hunter2-very-private"
         await kb.send_text(secret, secret=True)
-        text_blob = "\n".join(rec.getMessage() for rec in caplog.records)
-        assert secret not in text_blob
-        assert "redacted" in text_blob
+        blob = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert secret not in blob
+        assert "redacted" in blob
 
 
-class TestNotConnected:
+class TestErrors:
     @pytest.mark.asyncio
-    async def test_keystroke_not_connected(self) -> None:
-        kb = HttpKeyboardOutput()
-        with pytest.raises(KeyboardOutputError, match="Not connected"):
+    async def test_backend_unavailable_becomes_keyboard_error(self) -> None:
+        from afferent import BackendUnavailable
+
+        kb, gw = _kb()
+        gw.keystroke.side_effect = BackendUnavailable("gateway unreachable")
+        with pytest.raises(KeyboardOutputError):
             await kb.send_keystroke("a")
 
 
 class TestDisconnect:
     @pytest.mark.asyncio
-    async def test_disconnect(self, mock_client: AsyncMock) -> None:
-        kb = HttpKeyboardOutput()
-        kb._client = mock_client
+    async def test_disconnect(self) -> None:
+        kb, _ = _kb()
+        kb._connected = True
         await kb.disconnect()
-        mock_client.aclose.assert_called_once()
-        assert kb._client is None
-
-    @pytest.mark.asyncio
-    async def test_disconnect_when_not_connected(self) -> None:
-        kb = HttpKeyboardOutput()
-        await kb.disconnect()
+        assert kb._connected is False
