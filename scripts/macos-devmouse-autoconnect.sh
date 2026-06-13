@@ -16,6 +16,12 @@
 #   scripts/macos-devmouse-autoconnect.sh --install
 # Uninstall:
 #   scripts/macos-devmouse-autoconnect.sh --uninstall
+# Pause auto-reconnect so you can disconnect manually and have it
+# STAY disconnected (indefinite, or for N minutes), then resume:
+#   scripts/macos-devmouse-autoconnect.sh --pause [N]
+#   scripts/macos-devmouse-autoconnect.sh --resume
+# Show current state:
+#   scripts/macos-devmouse-autoconnect.sh --status
 # Run the poll loop in the foreground (what the LaunchAgent invokes):
 #   scripts/macos-devmouse-autoconnect.sh
 #
@@ -29,6 +35,12 @@ POLL_SECONDS="${POLL_SECONDS:-20}"
 LABEL="com.handsneyes.devmouse-autoconnect"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+# While this file exists the agent will NOT reconnect — so you can
+# disconnect devmouse from the menu bar and have it STAY disconnected
+# (e.g. to drive a different machine, or just pause it). Created by
+# `--pause`, removed by `--resume`. `--pause N` auto-resumes after N
+# minutes.
+PAUSE_FILE="${PAUSE_FILE:-$HOME/.config/handsneyes/devmouse-pause}"
 
 _blueutil() {
     if command -v blueutil >/dev/null 2>&1; then
@@ -86,13 +98,32 @@ reconnect() {
     hid_active
 }
 
+paused() {
+    # Honour a timed pause: if the pause file holds a future epoch,
+    # stay paused until then, otherwise (empty / indefinite) stay
+    # paused until --resume.
+    [ -f "$PAUSE_FILE" ] || return 1
+    local until
+    until="$(cat "$PAUSE_FILE" 2>/dev/null)"
+    if [ -n "$until" ] && [ "$until" -gt 0 ] 2>/dev/null; then
+        if [ "$(date +%s)" -ge "$until" ]; then
+            rm -f "$PAUSE_FILE"
+            echo "$(date '+%H:%M:%S') pause expired — resuming"
+            return 1
+        fi
+    fi
+    return 0
+}
+
 poll_loop() {
     echo "devmouse autoconnect: watching $DEVMOUSE_MAC every ${POLL_SECONDS}s"
     while true; do
-        # Respect a deliberate "Forget This Device": only act while
-        # still paired. Reconnect whenever HID is not actually up,
-        # even if BR/EDR shows connected.
-        if is_paired && ! hid_active; then
+        # Respect a deliberate "Forget This Device" (only act while
+        # still paired) and a manual pause (so the operator can
+        # disconnect and have it stay disconnected). Otherwise
+        # reconnect whenever HID is not actually up, even if BR/EDR
+        # shows connected.
+        if is_paired && ! paused && ! hid_active; then
             echo "$(date '+%H:%M:%S') devmouse HID down — reconnecting"
             if reconnect; then
                 echo "$(date '+%H:%M:%S') devmouse HID up"
@@ -102,6 +133,25 @@ poll_loop() {
         fi
         sleep "$POLL_SECONDS"
     done
+}
+
+pause_agent() {
+    mkdir -p "$(dirname "$PAUSE_FILE")"
+    local mins="${1:-}"
+    if [ -n "$mins" ] && [ "$mins" -gt 0 ] 2>/dev/null; then
+        echo "$(( $(date +%s) + mins * 60 ))" > "$PAUSE_FILE"
+        echo "auto-reconnect paused for ${mins} min — you can disconnect devmouse now"
+    else
+        echo "0" > "$PAUSE_FILE"
+        echo "auto-reconnect paused (indefinite) — resume with --resume"
+    fi
+    # Disconnect right away so the operator doesn't have to.
+    _blueutil --disconnect "$DEVMOUSE_MAC" 2>/dev/null || true
+}
+
+resume_agent() {
+    rm -f "$PAUSE_FILE"
+    echo "auto-reconnect resumed"
 }
 
 install_agent() {
@@ -153,5 +203,13 @@ uninstall_agent() {
 case "${1:-}" in
     --install)   install_agent ;;
     --uninstall) uninstall_agent ;;
+    --pause)     pause_agent "${2:-}" ;;
+    --resume)    resume_agent ;;
+    --status)
+        echo "paired:    $(is_paired && echo yes || echo no)"
+        echo "hid_up:    $(hid_active && echo yes || echo no)"
+        echo "paused:    $([ -f "$PAUSE_FILE" ] && echo yes || echo no)"
+        echo "agent:     $(launchctl list 2>/dev/null | grep -q "$LABEL" && echo loaded || echo not-loaded)"
+        ;;
     *)           poll_loop ;;
 esac
