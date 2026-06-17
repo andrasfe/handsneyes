@@ -582,6 +582,12 @@ body.col-resizing img { pointer-events: none; }
   opacity: 0.45;
   cursor: not-allowed;
 }
+.frame-quick-actions button.quick.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0b0d10;
+  font-weight: 600;
+}
 #btn-lock { border-color: #5a4040; }
 #btn-unlock { border-color: #2f5a3a; }
 #opt-vault {

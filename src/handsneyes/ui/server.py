@@ -145,6 +145,20 @@ class TargetSwitchRequest(BaseModel):
     name: str
 
 
+class KeepAwakeRequest(BaseModel):
+    enabled: bool
+    # Seconds between jiggles. Default well under the typical 1–2 min
+    # display-sleep timer so activity always lands first.
+    interval_seconds: float = Field(default=30.0, ge=2.0, le=300.0)
+    # HID units swept out-and-back per jiggle. Large enough to read as
+    # real activity and be visible; net displacement is zero.
+    amplitude: int = Field(default=600, ge=50, le=4000)
+    # Also fire a Cmd-Tab (out-and-back, so it returns to the same app)
+    # on this slower cadence — keyboard activity in addition to the
+    # mouse. 0 disables the Cmd-Tab.
+    cmd_tab_seconds: float = Field(default=180.0, ge=0.0, le=1800.0)
+
+
 class MouseClickAtRequest(BaseModel):
     x_pct: float = Field(ge=0.0, le=1.0)
     y_pct: float = Field(ge=0.0, le=1.0)
@@ -600,6 +614,11 @@ def create_app(
     # last_click_xy_at since the ratio is host-specific and a
     # long gap probably means the target/display config changed.
     app.state.last_homer_ratio_at = None
+
+    # Keep-awake jiggle: a background task that nudges the active
+    # target's cursor with net-zero big moves on an interval so the
+    # machine (and its display) never idles to sleep. None when off.
+    app.state.keep_awake_task = None
 
     # Homer-retrain state. n_trajectories_since_train is incremented
     # after every successful click_at — each click writes a fresh
@@ -3114,6 +3133,89 @@ def create_app(
             "platform": meta[req.name].get("platform"),
             "self_capture": rs["use_self_capture"],
         })
+
+    # ── keep-awake (anti-sleep cursor jiggle) ─────────────────────
+    # A background loop that nudges the ACTIVE target's cursor with a
+    # big out-and-back sweep on an interval, so the machine never
+    # idles to display/system sleep. Net displacement is zero, so it
+    # doesn't drift the pointer. Routes to the active target's
+    # bt_host_mac, so it keeps whichever computer the cc is pointed
+    # at awake. Skips a tick while a run/click is in progress (the
+    # per-host gateway lock would otherwise serialise against it).
+
+    async def _keep_awake_loop(
+        interval: float, amplitude: int, cmd_tab_seconds: float,
+    ) -> None:
+        import time as _t
+
+        from afferent import GatewayClient
+        base = "http://10.0.0.2:8080"
+        try:
+            base = settings.commander.pi_base_url  # type: ignore[union-attr]
+        except Exception:
+            pass
+        logger.info(
+            "keep-awake started (jiggle=%.0fs amplitude=%d cmd_tab=%.0fs)",
+            interval, amplitude, cmd_tab_seconds,
+        )
+        last_cmd_tab = _t.monotonic()
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                if runner.is_busy():
+                    continue
+                rs = app.state.runtime_state or {}
+                meta = (rs.get("targets_meta") or {}).get(
+                    rs.get("active_target"), {}
+                )
+                host = meta.get("bt_host_mac") or None
+                gw = GatewayClient(base, host_mac=host)
+                try:
+                    # Mouse: big out-and-back sweep (net-zero drift).
+                    await asyncio.to_thread(gw.move_large, amplitude, 0)
+                    await asyncio.sleep(0.25)
+                    await asyncio.to_thread(gw.move_large, -amplitude, 0)
+                    # Keyboard: occasional single Cmd-Tab — real key
+                    # activity (just switches to the previous app, no
+                    # need to switch back).
+                    if (
+                        cmd_tab_seconds > 0
+                        and _t.monotonic() - last_cmd_tab >= cmd_tab_seconds
+                    ):
+                        await asyncio.to_thread(
+                            gw.key_combo, ["meta"], "Tab"
+                        )
+                        last_cmd_tab = _t.monotonic()
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("keep-awake jiggle failed: %s", e)
+        except asyncio.CancelledError:
+            logger.info("keep-awake stopped")
+            raise
+
+    @app.get("/api/keep-awake")
+    def keep_awake_state() -> JSONResponse:
+        t = app.state.keep_awake_task
+        return JSONResponse({"enabled": bool(t and not t.done())})
+
+    @app.post("/api/keep-awake")
+    async def keep_awake_set(req: KeepAwakeRequest) -> JSONResponse:
+        t = app.state.keep_awake_task
+        running = bool(t and not t.done())
+        if req.enabled and not running:
+            app.state.keep_awake_task = asyncio.create_task(
+                _keep_awake_loop(
+                    req.interval_seconds, req.amplitude,
+                    req.cmd_tab_seconds,
+                )
+            )
+        elif not req.enabled and running:
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+            app.state.keep_awake_task = None
+        return JSONResponse({"ok": True, "enabled": bool(req.enabled)})
 
     @app.get("/api/capture-source")
     def capture_source_state() -> JSONResponse:

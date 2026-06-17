@@ -110,6 +110,8 @@
                 title="Drag a rectangle on the frame to define a watch area. On every interval, capture a fresh frame; if a saturated UI element appears inside the rectangle, click it. No-op when no target is present, so it's safe to leave running.">Watch &amp; Click…</button>
         <button id="btn-exec-script" type="button" class="quick"
                 title="Open a textarea, paste a shell script, run it on the target">Execute Script…</button>
+        <button id="btn-keep-awake" type="button" class="quick"
+                title="Keep the active target awake: jiggle its cursor (big out-and-back sweep, no net drift) every ~30s until you click again to stop. Runs server-side, so it keeps going even if you background this tab.">☕ Keep Awake</button>
         <button id="btn-retrain" type="button" class="quick"
                 title="Fine-tune the currently-installed pointer-accel model on samples collected since the last tune. Warm-starts from Live; on completion the new model is auto-installed (the prior Live is saved to a one-deep Previous slot for Rollback).">
           Tune homer <span id="retrain-count">(0 new)</span>

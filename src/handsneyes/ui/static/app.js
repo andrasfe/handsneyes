@@ -3272,11 +3272,54 @@ if ($optTarget) {
   });
 }
 
+// ── keep-awake toggle ────────────────────────────────────────────
+// Server-side cursor jiggle on the active target so it never sleeps.
+// The button reflects on/off state; the loop lives on the server, so
+// it keeps running even if this tab is backgrounded or reloaded.
+const $btnKeepAwake = document.getElementById("btn-keep-awake");
+
+function paintKeepAwake(on) {
+  if (!$btnKeepAwake) return;
+  $btnKeepAwake.classList.toggle("active", !!on);
+  $btnKeepAwake.textContent = on ? "☕ Keep Awake ✓" : "☕ Keep Awake";
+}
+
+async function refreshKeepAwake() {
+  if (!$btnKeepAwake) return;
+  try {
+    const r = await fetch("/api/keep-awake");
+    if (r.ok) paintKeepAwake((await r.json()).enabled);
+  } catch (e) { /* ignore */ }
+}
+
+if ($btnKeepAwake) {
+  $btnKeepAwake.addEventListener("click", async () => {
+    const turningOn = !$btnKeepAwake.classList.contains("active");
+    try {
+      const r = await fetch("/api/keep-awake", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: turningOn }),
+      });
+      const d = await r.json();
+      if (!r.ok) {
+        appendSystemLog("ERROR", `keep-awake failed: ${d.detail || r.status}`);
+        return;
+      }
+      paintKeepAwake(d.enabled);
+      appendSystemLog("INFO", `keep-awake ${d.enabled ? "on" : "off"}`);
+    } catch (e) {
+      appendSystemLog("ERROR", `keep-awake error: ${e}`);
+    }
+  });
+}
+
 async function init() {
   await loadChatHistory();
   await refreshKnownIds();
   connectGlobalLogs();
   await loadTargets();
+  await refreshKeepAwake();
   pollLatest();
   // Periodic re-list to catch ring-buffer evictions / deep history.
   // 30 s is enough: pollLatest()'s long-poll already pushes new
