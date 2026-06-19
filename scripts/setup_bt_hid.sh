@@ -154,6 +154,14 @@ EOF
 # devmouse — Bluetooth HID (Keyboard + Mouse)
 Name = devmouse
 Class = 0x0025C0
+# BR/EDR-only. The HID gateway is a classic-Bluetooth device and needs
+# no LE. Critically, a paired Mac keeps opening an Apple-Continuity LE
+# link to this adapter; on the Pi Zero 2 W's combo radio that LE link
+# wedges in "state 5" and jams the whole controller (every HCI op then
+# returns "Connection timed out"), which blocks the BR/EDR HID
+# reconnect — the recurring "can't connect the remote Mac" failure.
+# Forcing bredr mode means the Mac can't open the LE link at all.
+ControllerMode = bredr
 DiscoverableTimeout = 0
 PairableTimeout = 0
 Discoverable = true
