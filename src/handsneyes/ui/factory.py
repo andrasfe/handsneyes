@@ -27,7 +27,6 @@ to run records: ``<watch_dir>/<run_id>/0001_..._navigate_check.png``.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -124,9 +123,14 @@ def make_target_context_factory(
                 capture = ScreenCapture(display_index=target.camera_index)
             else:
                 capture = WebcamCapture(device_index=target.camera_index)
-                if target.rectify or os.environ.get(
-                    "HANDSNEYES_RECTIFY",
-                ) == "1":
+                # Perspective rectification is ONLY for a real camera
+                # viewing a screen off-axis. It must be an explicit
+                # per-target opt-in (targets.toml `rectify = true`) —
+                # NOT a global env flag, which wrongly warped HDMI /
+                # virtual-camera targets (already rectilinear): the
+                # quad detector latches onto a sub-window and squashes
+                # the whole screen into it.
+                if target.rectify:
                     from handsneyes.core.capture.rectified import (
                         RectifiedCapture,
                     )
