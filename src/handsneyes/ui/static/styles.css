@@ -588,6 +588,23 @@ body.col-resizing img { pointer-events: none; }
   color: #0b0d10;
   font-weight: 600;
 }
+.keep-awake-cfg {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--fg-dim, #9aa3ad);
+}
+.keep-awake-cfg input {
+  width: 3.4em;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 6px;
+  padding: 3px 5px;
+  font-size: 11px;
+}
+.keep-awake-cfg .ka-unit { margin-right: 4px; }
 #btn-lock { border-color: #5a4040; }
 #btn-unlock { border-color: #2f5a3a; }
 #opt-vault {

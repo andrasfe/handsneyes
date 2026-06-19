@@ -111,7 +111,18 @@
         <button id="btn-exec-script" type="button" class="quick"
                 title="Open a textarea, paste a shell script, run it on the target">Execute Script…</button>
         <button id="btn-keep-awake" type="button" class="quick"
-                title="Keep the active target awake: jiggle its cursor (big out-and-back sweep, no net drift) every ~30s until you click again to stop. Runs server-side, so it keeps going even if you background this tab.">☕ Keep Awake</button>
+                title="Keep the active target awake: jiggle its cursor (big out-and-back sweep, no net drift) on the interval, plus a periodic Cmd-Tab, until you click again to stop. Runs server-side, so it keeps going even if you background this tab.">☕ Keep Awake</button>
+        <span class="keep-awake-cfg" title="Keep-awake cadence. Changes apply live while it's running.">
+          <input type="number" id="ka-interval" min="2" max="300" step="1" value="30"
+                 title="Mouse jiggle interval (seconds)" />
+          <span class="ka-unit">s move</span>
+          <input type="number" id="ka-amp" min="50" max="4000" step="50" value="600"
+                 title="Jiggle amplitude — HID units swept out-and-back (net-zero drift)" />
+          <span class="ka-unit">amp</span>
+          <input type="number" id="ka-cmdtab" min="0" max="1800" step="10" value="180"
+                 title="Cmd-Tab cadence in seconds (0 = no Cmd-Tab)" />
+          <span class="ka-unit">s ⇥</span>
+        </span>
         <button id="btn-retrain" type="button" class="quick"
                 title="Fine-tune the currently-installed pointer-accel model on samples collected since the last tune. Warm-starts from Live; on completion the new model is auto-installed (the prior Live is saved to a one-deep Previous slot for Rollback).">
           Tune homer <span id="retrain-count">(0 new)</span>

@@ -3277,6 +3277,21 @@ if ($optTarget) {
 // The button reflects on/off state; the loop lives on the server, so
 // it keeps running even if this tab is backgrounded or reloaded.
 const $btnKeepAwake = document.getElementById("btn-keep-awake");
+const $kaInterval = document.getElementById("ka-interval");
+const $kaAmp = document.getElementById("ka-amp");
+const $kaCmdTab = document.getElementById("ka-cmdtab");
+
+function keepAwakeCfg() {
+  const num = (el, def) => {
+    const v = parseFloat(el && el.value);
+    return Number.isFinite(v) ? v : def;
+  };
+  return {
+    interval_seconds: num($kaInterval, 30),
+    amplitude: Math.round(num($kaAmp, 600)),
+    cmd_tab_seconds: num($kaCmdTab, 180),
+  };
+}
 
 function paintKeepAwake(on) {
   if (!$btnKeepAwake) return;
@@ -3292,26 +3307,54 @@ async function refreshKeepAwake() {
   } catch (e) { /* ignore */ }
 }
 
+async function setKeepAwake(enabled) {
+  const body = enabled ? { enabled: true, ...keepAwakeCfg() } : { enabled: false };
+  const r = await fetch("/api/keep-awake", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const d = await r.json();
+  if (!r.ok) {
+    appendSystemLog("ERROR", `keep-awake failed: ${d.detail || r.status}`);
+    return null;
+  }
+  return d;
+}
+
 if ($btnKeepAwake) {
   $btnKeepAwake.addEventListener("click", async () => {
     const turningOn = !$btnKeepAwake.classList.contains("active");
     try {
-      const r = await fetch("/api/keep-awake", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: turningOn }),
-      });
-      const d = await r.json();
-      if (!r.ok) {
-        appendSystemLog("ERROR", `keep-awake failed: ${d.detail || r.status}`);
-        return;
+      const d = await setKeepAwake(turningOn);
+      if (d) {
+        paintKeepAwake(d.enabled);
+        appendSystemLog("INFO", `keep-awake ${d.enabled ? "on" : "off"}`);
       }
-      paintKeepAwake(d.enabled);
-      appendSystemLog("INFO", `keep-awake ${d.enabled ? "on" : "off"}`);
     } catch (e) {
       appendSystemLog("ERROR", `keep-awake error: ${e}`);
     }
   });
+
+  // Changing a cadence input while it's running re-applies live
+  // (stop + start with the new values).
+  let _kaReapply = null;
+  const reapply = () => {
+    if (!$btnKeepAwake.classList.contains("active")) return;
+    clearTimeout(_kaReapply);
+    _kaReapply = setTimeout(async () => {
+      try {
+        await setKeepAwake(false);
+        const d = await setKeepAwake(true);
+        if (d) appendSystemLog("INFO", "keep-awake cadence updated");
+      } catch (e) {
+        appendSystemLog("ERROR", `keep-awake update error: ${e}`);
+      }
+    }, 400);
+  };
+  [$kaInterval, $kaAmp, $kaCmdTab].forEach(
+    (el) => el && el.addEventListener("change", reapply),
+  );
 }
 
 async function init() {
