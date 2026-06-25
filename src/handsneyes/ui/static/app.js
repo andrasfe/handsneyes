@@ -3280,6 +3280,7 @@ const $btnKeepAwake = document.getElementById("btn-keep-awake");
 const $kaInterval = document.getElementById("ka-interval");
 const $kaAmp = document.getElementById("ka-amp");
 const $kaCmdTab = document.getElementById("ka-cmdtab");
+const $kaDuration = document.getElementById("ka-duration");
 
 function keepAwakeCfg() {
   const num = (el, def) => {
@@ -3290,20 +3291,30 @@ function keepAwakeCfg() {
     interval_seconds: num($kaInterval, 30),
     amplitude: Math.round(num($kaAmp, 600)),
     cmd_tab_seconds: num($kaCmdTab, 180),
+    duration_minutes: num($kaDuration, -1),
   };
 }
 
-function paintKeepAwake(on) {
+function paintKeepAwake(on, remainingSeconds) {
   if (!$btnKeepAwake) return;
   $btnKeepAwake.classList.toggle("active", !!on);
-  $btnKeepAwake.textContent = on ? "☕ Keep Awake ✓" : "☕ Keep Awake";
+  let label = on ? "☕ Keep Awake ✓" : "☕ Keep Awake";
+  // remaining_seconds is null when running forever or off; show a
+  // minute countdown only for a finite duration.
+  if (on && remainingSeconds != null && Number.isFinite(remainingSeconds)) {
+    label += ` (${Math.ceil(remainingSeconds / 60)}m left)`;
+  }
+  $btnKeepAwake.textContent = label;
 }
 
 async function refreshKeepAwake() {
   if (!$btnKeepAwake) return;
   try {
     const r = await fetch("/api/keep-awake");
-    if (r.ok) paintKeepAwake((await r.json()).enabled);
+    if (r.ok) {
+      const d = await r.json();
+      paintKeepAwake(d.enabled, d.remaining_seconds);
+    }
   } catch (e) { /* ignore */ }
 }
 
@@ -3352,7 +3363,7 @@ if ($btnKeepAwake) {
       }
     }, 400);
   };
-  [$kaInterval, $kaAmp, $kaCmdTab].forEach(
+  [$kaInterval, $kaAmp, $kaCmdTab, $kaDuration].forEach(
     (el) => el && el.addEventListener("change", reapply),
   );
 }
@@ -3363,6 +3374,9 @@ async function init() {
   connectGlobalLogs();
   await loadTargets();
   await refreshKeepAwake();
+  // Periodic resync so the toggle reflects a server-side auto-stop
+  // (duration elapsed) and the countdown stays current.
+  setInterval(refreshKeepAwake, 15000);
   pollLatest();
   // Periodic re-list to catch ring-buffer evictions / deep history.
   // 30 s is enough: pollLatest()'s long-poll already pushes new

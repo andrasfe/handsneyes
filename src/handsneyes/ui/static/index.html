@@ -122,6 +122,9 @@
           <input type="number" id="ka-cmdtab" min="0" max="1800" step="10" value="180"
                  title="Cmd-Tab cadence in seconds (0 = no Cmd-Tab)" />
           <span class="ka-unit">s ⇥</span>
+          <input type="number" id="ka-duration" min="-1" max="10080" step="5" value="-1"
+                 title="Auto-stop after this many minutes (-1 = forever / until turned off manually)" />
+          <span class="ka-unit">min</span>
         </span>
         <button id="btn-retrain" type="button" class="quick"
                 title="Fine-tune the currently-installed pointer-accel model on samples collected since the last tune. Warm-starts from Live; on completion the new model is auto-installed (the prior Live is saved to a one-deep Previous slot for Rollback).">

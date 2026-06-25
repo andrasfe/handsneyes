@@ -157,6 +157,11 @@ class KeepAwakeRequest(BaseModel):
     # on this slower cadence — keyboard activity in addition to the
     # mouse. 0 disables the Cmd-Tab.
     cmd_tab_seconds: float = Field(default=180.0, ge=0.0, le=1800.0)
+    # How long to keep jiggling, in minutes. -1 (the default) means run
+    # forever until turned off manually. Any value <= 0 is treated as
+    # forever; a positive value auto-stops the loop after that many
+    # minutes. Capped at one week.
+    duration_minutes: float = Field(default=-1.0, ge=-1.0, le=10080.0)
 
 
 class MouseClickAtRequest(BaseModel):
@@ -619,6 +624,10 @@ def create_app(
     # target's cursor with net-zero big moves on an interval so the
     # machine (and its display) never idles to sleep. None when off.
     app.state.keep_awake_task = None
+    # Monotonic deadline at which the keep-awake loop auto-stops, or
+    # None when running forever / off. Exposed via GET so the UI can
+    # show the countdown and flip the toggle off when it elapses.
+    app.state.keep_awake_deadline = None
 
     # Homer-retrain state. n_trajectories_since_train is incremented
     # after every successful click_at — each click writes a fresh
@@ -3145,6 +3154,7 @@ def create_app(
 
     async def _keep_awake_loop(
         interval: float, amplitude: int, cmd_tab_seconds: float,
+        duration_minutes: float = -1.0,
     ) -> None:
         import time as _t
 
@@ -3154,14 +3164,28 @@ def create_app(
             base = settings.commander.pi_base_url  # type: ignore[union-attr]
         except Exception:
             pass
+        # duration_minutes <= 0 (default -1) means run forever.
+        forever = duration_minutes is None or duration_minutes <= 0
+        deadline = (
+            None if forever else _t.monotonic() + duration_minutes * 60.0
+        )
+        app.state.keep_awake_deadline = deadline
         logger.info(
-            "keep-awake started (jiggle=%.0fs amplitude=%d cmd_tab=%.0fs)",
+            "keep-awake started (jiggle=%.0fs amplitude=%d cmd_tab=%.0fs "
+            "duration=%s)",
             interval, amplitude, cmd_tab_seconds,
+            "forever" if forever else f"{duration_minutes:.0f}min",
         )
         last_cmd_tab = _t.monotonic()
         try:
             while True:
+                if deadline is not None and _t.monotonic() >= deadline:
+                    logger.info("keep-awake duration elapsed — stopping")
+                    break
                 await asyncio.sleep(interval)
+                if deadline is not None and _t.monotonic() >= deadline:
+                    logger.info("keep-awake duration elapsed — stopping")
+                    break
                 if runner.is_busy():
                     continue
                 rs = app.state.runtime_state or {}
@@ -3191,11 +3215,24 @@ def create_app(
         except asyncio.CancelledError:
             logger.info("keep-awake stopped")
             raise
+        finally:
+            # Whether cancelled or duration-elapsed, the loop is no
+            # longer counting down — clear the deadline so GET reports
+            # no remaining time.
+            app.state.keep_awake_deadline = None
 
     @app.get("/api/keep-awake")
     def keep_awake_state() -> JSONResponse:
+        import time as _t
         t = app.state.keep_awake_task
-        return JSONResponse({"enabled": bool(t and not t.done())})
+        enabled = bool(t and not t.done())
+        deadline = getattr(app.state, "keep_awake_deadline", None)
+        remaining = None
+        if enabled and deadline is not None:
+            remaining = max(0.0, deadline - _t.monotonic())
+        return JSONResponse(
+            {"enabled": enabled, "remaining_seconds": remaining}
+        )
 
     @app.post("/api/keep-awake")
     async def keep_awake_set(req: KeepAwakeRequest) -> JSONResponse:
@@ -3205,7 +3242,7 @@ def create_app(
             app.state.keep_awake_task = asyncio.create_task(
                 _keep_awake_loop(
                     req.interval_seconds, req.amplitude,
-                    req.cmd_tab_seconds,
+                    req.cmd_tab_seconds, req.duration_minutes,
                 )
             )
         elif not req.enabled and running:
