@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# setup_mini_gateway_venv.sh — build the Python venv that runs the
-# afferent BT-HID gateway on a "mini" (a regular Linux host acting as the
-# Bluetooth mouse, replacing the Pi). Run as the normal user, NOT root.
+# setup_local_gateway_venv.sh — build the Python venv that runs the
+# afferent BT-HID gateway on the local Linux host (a regular machine
+# acting as the Bluetooth mouse, replacing a separate Pi). Run as the
+# normal user, NOT root.
 #
-#   bash scripts/setup_mini_gateway_venv.sh
+#   bash scripts/setup_local_gateway_venv.sh
 #
 # Why a dedicated venv (and why it's fiddly):
 #   * The gateway needs python-dbus, which is a SYSTEM package
@@ -47,4 +48,4 @@ PYTHONNOUSERSITE=1 "$GW_VENV/bin/python" -c \
 
 echo
 echo "Done. Gateway binary: $GW_VENV/bin/afferent-gateway"
-echo "Next: sudo bash scripts/setup_mini_hid.sh"
+echo "Next: sudo bash scripts/setup_local_hid.sh"

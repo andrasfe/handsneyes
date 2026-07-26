@@ -5,11 +5,11 @@
 # resolution; bt_host_mac (optional) pins clicks/keepalive to one host
 # when the gateway has several connected.
 
-# --- Option A: mini as the HID host (gateway runs on THIS machine) --------
-# The Bluetooth mouse is emulated locally (see docs/mini-hid-host.md);
+# --- Option A: local host is the HID device (gateway on THIS machine) -----
+# The Bluetooth mouse is emulated locally (see docs/local-hid-host.md);
 # the target Mac pairs with this machine's Bluetooth. No Pi.
 [[target]]
-name         = "mac-via-mini"
+name         = "mac-local-bt"
 platform     = "macos"          # target OS: "macos" | "linux_gnome" | "headless"
 camera_index = 0
 pi_url       = "http://localhost:8080"
@@ -17,7 +17,7 @@ transport    = "bt"
 screen_size  = [1920, 1080]
 # bt_host_mac = "AA:BB:CC:DD:EE:FF"   # the target's BT MAC (optional)
 
-# --- Option B: Raspberry Pi as the HID host (over USB-ECM) -----------------
+# --- Option B: Raspberry Pi as the HID device (over USB-ECM) ---------------
 # [[target]]
 # name         = "couch-ubuntu"
 # platform     = "linux_gnome"

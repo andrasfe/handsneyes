@@ -224,9 +224,9 @@ Same as terminaleyes — `src/handsneyes/pi/` ports verbatim with brand-string r
 
 `handsneyes-pi` entry-point binary runs on the Pi. SDP record advertises as "devmouse". `bluetoothd --noplugin=input --compat` is mandatory (see /docs/pi-setup or the original terminaleyes CLAUDE.md for the full debugging checklist — those hard-won lessons still apply).
 
-### Alternative: mini as the HID host (no Pi)
+### Alternative: local host as the HID device (no Pi)
 
-A regular Linux host within BT range of the target can emulate the mouse itself — its own Bluetooth advertises "devmouse" and the target pairs with it directly, running the same `afferent-gateway` on `localhost:8080`. This drops the Pi and its USB-ECM link entirely, and keeps all bond/pairing state local (no unreachable Pi). Setup is scripted: `scripts/setup_mini_gateway_venv.sh` (build the gateway venv) then `sudo scripts/setup_mini_hid.sh` (configure BlueZ + launch). Full walkthrough + trade-offs in `docs/mini-hid-host.md`; point the cc at it via `config/targets.toml` (`pi_url = "http://localhost:8080"`, see `config/targets.example.toml`).
+A regular Linux host within BT range of the target can emulate the mouse itself — its own Bluetooth advertises "devmouse" and the target pairs with it directly, running the same `afferent-gateway` on `localhost:8080`. This drops the Pi and its USB-ECM link entirely, and keeps all bond/pairing state local (no unreachable Pi). Setup is scripted: `scripts/setup_local_gateway_venv.sh` (build the gateway venv) then `sudo scripts/setup_local_hid.sh` (configure BlueZ + launch). Full walkthrough + trade-offs in `docs/local-hid-host.md`; point the cc at it via `config/targets.toml` (`pi_url = "http://localhost:8080"`, see `config/targets.example.toml`).
 
 ### BT HID gotchas (verified live, 2026-05-29)
 
