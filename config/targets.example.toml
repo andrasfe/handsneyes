@@ -1,0 +1,27 @@
+# handsneyes target registry — copy to config/targets.toml and edit.
+#
+# The cc auto-selects the first non-headless target at startup. pi_url is
+# the BT-HID gateway URL the app drives; screen_size is the target's
+# resolution; bt_host_mac (optional) pins clicks/keepalive to one host
+# when the gateway has several connected.
+
+# --- Option A: mini as the HID host (gateway runs on THIS machine) --------
+# The Bluetooth mouse is emulated locally (see docs/mini-hid-host.md);
+# the target Mac pairs with this machine's Bluetooth. No Pi.
+[[target]]
+name         = "mac-via-mini"
+platform     = "macos"          # target OS: "macos" | "linux_gnome" | "headless"
+camera_index = 0
+pi_url       = "http://localhost:8080"
+transport    = "bt"
+screen_size  = [1920, 1080]
+# bt_host_mac = "AA:BB:CC:DD:EE:FF"   # the target's BT MAC (optional)
+
+# --- Option B: Raspberry Pi as the HID host (over USB-ECM) -----------------
+# [[target]]
+# name         = "couch-ubuntu"
+# platform     = "linux_gnome"
+# camera_index = 0
+# pi_url       = "http://10.0.0.2:8080"
+# transport    = "bt"
+# screen_size  = [1920, 1080]
