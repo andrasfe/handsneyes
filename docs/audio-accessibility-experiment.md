@@ -106,13 +106,45 @@ segments, _ = model.transcribe("capture.wav", beam_size=5)
 text = " ".join(s.text.strip() for s in segments)
 ```
 
+## The listener service
+
+`scripts/speech_listener.py` implements the perception channel end to end:
+isolated tap → VAD gate → local STT → `speech_logs/`.
+
+```bash
+python3 scripts/speech_listener.py              # run until Ctrl-C
+python3 scripts/speech_listener.py --list       # show candidate sources
+python3 scripts/speech_listener.py --model base.en --threshold 250
+```
+
+- **Isolated tap.** `bluez_input.<MAC>.N` is a *playback stream*, not a capture
+  source, so recording it directly returns silence. The service instead starts
+  a capture client with `node.autoconnect=false` and links the stream's output
+  port to it. The link is additive — existing links are untouched, so the audio
+  keeps playing normally while being tapped, and local sounds never enter the
+  capture.
+- **Only active when sound arrives.** A frame-wise RMS gate (30 ms frames)
+  starts buffering after two consecutive loud frames and flushes the utterance
+  after `--hang-ms` of silence. Silence costs nothing: no model invocation.
+  This also avoids Whisper's habit of inventing text from silence; a junk-phrase
+  filter is the second line of defence.
+- **Output.** `speech_logs/YYYY-MM-DD.jsonl` (one object per utterance:
+  timestamp, duration, peak RMS, text) plus a human-readable `.txt` mirror.
+
+> **Privacy.** These transcripts are speech captured from the target machine and
+> can contain confidential material — meetings, calls, anything audible. The
+> directory is gitignored and must never be committed. Everything stays on this
+> host: no audio or text leaves the machine.
+
 ## Open questions / next steps
 
-1. **Isolate the perception stream.** The measurement above captured the sink
-   monitor, i.e. the mix of everything playing locally. A real pipeline should
-   capture the `bluez_input` node alone so local sound does not pollute STT.
-2. **Stream instead of batch.** Feed STT rolling chunks (with VAD) rather than
-   whole files, so narration turns into text as it is spoken.
+1. **Prove the mic direction end-to-end** (agent speaking *into* the target).
+   Routed and active but unexercised; macOS switching its own output when HFP
+   engages is the likely obstacle.
+2. **Wire narration into the agent loop** — feed the transcript to the
+   controller so a screen reader's description drives the next action.
+3. **Repetition guard.** Whisper can loop ("Okay. Okay. Okay…") on some inputs;
+   worth collapsing runs of identical short phrases.
 3. **Prove the mic direction end-to-end.** macOS tends to switch its own output
    when HFP's microphone engages, which may fight the listening channel;
    expect to choreograph A2DP-for-listening vs HFP-only-while-speaking.

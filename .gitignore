@@ -67,3 +67,7 @@ data/ml/
 !src/handsneyes/platforms/*/models/
 *.safetensors
 .playwright-mcp/
+
+# Transcripts of captured target audio — may contain confidential speech.
+# Never commit these.
+speech_logs/
