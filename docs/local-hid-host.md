@@ -86,6 +86,22 @@ Keep the local-gateway target (its `pi_url = "http://localhost:8080"`); set
 `bt_host_mac` to the Mac's BT MAC if the gateway holds more than one host.
 Restart `handsneyes cc`.
 
+## Surviving reboots
+
+`setup_local_hid.sh` launches the agent and gateway as ad-hoc background root
+processes — they die on reboot and the mouse silently stops. Install them as
+systemd services instead (once):
+
+```bash
+sudo bash scripts/install_local_hid_services.sh      # --uninstall to remove
+systemctl status handsneyes-gateway handsneyes-btagent
+journalctl -u handsneyes-gateway -f
+```
+
+Both carry `Restart=always` and start after `bluetooth.service`, re-asserting
+the adapter's runtime state (alias, and pairable/discoverable only while
+nothing is bonded) before the gateway binds L2CAP.
+
 ## Troubleshooting
 
 - **`ModuleNotFoundError` when the gateway starts as root** — a dep resolved
@@ -96,8 +112,18 @@ Restart `handsneyes cc`.
 - **Mac audio routes to this host after pairing** — the audio SDP strip didn't
   run; run `sudo bash scripts/bt-strip-audio-sdp.sh`, then reselect your normal
   output on the Mac once.
-- **Cursor doesn't move but moves return `ok`** — HID reports are accepted but
-  not landing as motion; re-pair from the Mac (Forget → pair again).
+- **Other machines keep popping up "devmouse" pairing prompts** — the adapter
+  is still advertising. Once the target is bonded you don't need it:
+  `bluetoothctl discoverable off && bluetoothctl pairable off`. A bonded target
+  reconnects without either.
+- **Cursor doesn't move but every call returns `ok`** — the most common failure,
+  and the status is misleading: `bt_hid_connected: true` plus `200 OK` only mean
+  the report was written to an open socket, not that macOS consumed it. The
+  session can go stale (socket open, host ignoring it) with no error anywhere.
+  Fix: disconnect and reconnect **from the Mac**. Note that connecting from this
+  side (`bluetoothctl connect`) brings up the ACL link but *not* the HID
+  channels — only the host can open those, so the reconnect must originate on
+  the Mac.
 
 ## Reverting to a normal Bluetooth stack
 
