@@ -53,6 +53,12 @@ cat > "$ASSERT" <<EOF
 sleep 2
 bluetoothctl power on            >/dev/null 2>&1 || true
 bluetoothctl system-alias $ALIAS >/dev/null 2>&1 || true
+# Force the HID device class (peripheral / combo keyboard+pointing).
+# BlueZ does not reliably apply main.conf's Class= — it derives the class
+# from registered profiles, so with the input plugin disabled (and no audio
+# endpoints registered) the adapter falls back to 0x000104 "Computer".
+# A target scanning for a mouse then does not show it as one.
+hciconfig hci0 class 0x0025c0 >/dev/null 2>&1 || true
 if [ -z "\$(bluetoothctl devices Paired 2>/dev/null)" ]; then
     # No target bonded yet — advertise so it can be paired.
     bluetoothctl pairable on     >/dev/null 2>&1 || true

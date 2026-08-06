@@ -129,6 +129,18 @@ nothing is bonded) before the gateway binds L2CAP.
   once. Deleting that file and restarting wireplumber re-enables audio — which
   is what the accessibility work in `audio-accessibility-experiment.md` needs,
   so the two are mutually exclusive by design.
+- **The target can't see devmouse at all when scanning** — check the adapter's
+  device class:
+  ```bash
+  hciconfig -a hci0 | grep -i class      # want 0x0025c0, not 0x000104
+  sudo hciconfig hci0 class 0x0025c0     # fix
+  ```
+  BlueZ does not reliably apply `Class=` from `main.conf`; it derives the class
+  from registered profiles. With the input plugin disabled — and especially
+  after disabling the Bluetooth audio endpoints — the adapter falls back to
+  `0x000104` ("Computer, Desktop workstation"), and a target looking for a
+  mouse won't list it as one. `install_local_hid_services.sh` re-asserts the
+  class on every gateway start.
 - **Other machines keep popping up "devmouse" pairing prompts** — the adapter
   is still advertising. Once the target is bonded you don't need it:
   `bluetoothctl discoverable off && bluetoothctl pairable off`. A bonded target
