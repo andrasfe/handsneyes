@@ -111,7 +111,7 @@
         <button id="btn-exec-script" type="button" class="quick"
                 title="Open a textarea, paste a shell script, run it on the target">Execute Script…</button>
         <button id="btn-keep-awake" type="button" class="quick"
-                title="Keep the active target awake: jiggle its cursor (big out-and-back sweep, no net drift) on the interval, plus a periodic Cmd-Tab, until you click again to stop. Runs server-side, so it keeps going even if you background this tab.">☕ Keep Awake</button>
+                title="Keep the active target awake: jiggle its cursor (big out-and-back sweep, no net drift) on the interval, plus a periodic Cmd-Tab, until you click again to stop. On enable it fires one visible one-way nudge (not returned to origin) so you can confirm it engaged. Runs server-side, so it keeps going even if you background this tab.">☕ Keep Awake</button>
         <span class="keep-awake-cfg" title="Keep-awake cadence. Changes apply live while it's running.">
           <input type="number" id="ka-interval" min="2" max="300" step="1" value="30"
                  title="Mouse jiggle interval (seconds)" />

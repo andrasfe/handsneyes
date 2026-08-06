@@ -3177,6 +3177,25 @@ def create_app(
             "forever" if forever else f"{duration_minutes:.0f}min",
         )
         last_cmd_tab = _t.monotonic()
+
+        def _client() -> "GatewayClient":
+            rs = app.state.runtime_state or {}
+            meta = (rs.get("targets_meta") or {}).get(
+                rs.get("active_target"), {}
+            )
+            return GatewayClient(base, host_mac=meta.get("bt_host_mac") or None)
+
+        # Confirmation nudge, fired immediately on enable: a single one-way
+        # move that is deliberately NOT returned to origin. The steady-state
+        # jiggle is net-zero and therefore invisible, so without this the
+        # operator has no way to tell keep-awake actually engaged.
+        try:
+            await asyncio.to_thread(_client().move_large, amplitude, 0)
+            logger.info("keep-awake confirmation nudge sent (%d HID units)",
+                        amplitude)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("keep-awake confirmation nudge failed: %s", e)
+
         try:
             while True:
                 if deadline is not None and _t.monotonic() >= deadline:
@@ -3188,12 +3207,7 @@ def create_app(
                     break
                 if runner.is_busy():
                     continue
-                rs = app.state.runtime_state or {}
-                meta = (rs.get("targets_meta") or {}).get(
-                    rs.get("active_target"), {}
-                )
-                host = meta.get("bt_host_mac") or None
-                gw = GatewayClient(base, host_mac=host)
+                gw = _client()
                 try:
                     # Mouse: big out-and-back sweep (net-zero drift).
                     await asyncio.to_thread(gw.move_large, amplitude, 0)
