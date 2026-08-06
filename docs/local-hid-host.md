@@ -109,9 +109,26 @@ nothing is bonded) before the gateway binds L2CAP.
   venv with `PYTHONNOUSERSITE=1`.
 - **Mac still shows the old adapter name, not "devmouse"** — macOS caches the
   BT name per-MAC. Toggle the Mac's Bluetooth off/on to flush.
-- **Mac audio routes to this host after pairing** — the audio SDP strip didn't
-  run; run `sudo bash scripts/bt-strip-audio-sdp.sh`, then reselect your normal
-  output on the Mac once.
+- **Target loses its sound while connected** — e.g. on a video call "others can
+  hear me, I can't hear them". The target sees devmouse as an audio device and
+  routes its system *output* here, where nothing plays it back. PipeWire
+  registers A2DP/HFP endpoints for every connected Bluetooth device, and
+  `bluetoothd --noplugin=a2dp,...` does **not** stop it (those endpoints come
+  via BlueZ's D-Bus media API). The durable fix needs no root — stop offering
+  audio roles at all, so devmouse advertises as pure HID:
+
+  ```bash
+  mkdir -p ~/.config/wireplumber/bluetooth.lua.d
+  cp config/wireplumber/51-disable-bt-audio.lua ~/.config/wireplumber/bluetooth.lua.d/
+  systemctl --user restart wireplumber
+  wpctl status | grep -i bluez     # expect no bluez audio nodes
+  ```
+
+  The target caches SDP per-MAC, so disconnect/reconnect devmouse (or toggle the
+  target's Bluetooth) for it to notice, then reselect your normal output device
+  once. Deleting that file and restarting wireplumber re-enables audio — which
+  is what the accessibility work in `audio-accessibility-experiment.md` needs,
+  so the two are mutually exclusive by design.
 - **Other machines keep popping up "devmouse" pairing prompts** — the adapter
   is still advertising. Once the target is bonded you don't need it:
   `bluetoothctl discoverable off && bluetoothctl pairable off`. A bonded target
