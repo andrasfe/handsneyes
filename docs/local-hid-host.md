@@ -116,6 +116,20 @@ nothing is bonded) before the gateway binds L2CAP.
   is still advertising. Once the target is bonded you don't need it:
   `bluetoothctl discoverable off && bluetoothctl pairable off`. A bonded target
   reconnects without either.
+- **The target won't connect at all** (no attempt even reaches us — the adapter
+  never shows `Connected: yes`): the *local* side is holding a stale bond that
+  the target no longer matches, and BlueZ rejects its attempts at the radio
+  level, silently, with nothing in any log. Clear our bond and let it pair
+  fresh — this is the single most common "it just won't connect":
+  ```bash
+  bluetoothctl remove <TARGET_MAC>
+  bluetoothctl pairable on && bluetoothctl discoverable on
+  # then pair "devmouse" again from the target; re-trust afterwards:
+  bluetoothctl trust <TARGET_MAC>
+  bluetoothctl pairable off && bluetoothctl discoverable off
+  ```
+  A fresh pairing resets `Trusted`, so set it again or the gateway's reconnect
+  watchdog logs `no trusted devices, sleeping` and never helps.
 - **Cursor doesn't move but every call returns `ok`** — the most common failure,
   and the status is misleading: `bt_hid_connected: true` plus `200 OK` only mean
   the report was written to an open socket, not that macOS consumed it. The
