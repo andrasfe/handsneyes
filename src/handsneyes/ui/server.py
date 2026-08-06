@@ -3189,8 +3189,10 @@ def create_app(
         # move that is deliberately NOT returned to origin. The steady-state
         # jiggle is net-zero and therefore invisible, so without this the
         # operator has no way to tell keep-awake actually engaged.
+        direction = 1
         try:
             await asyncio.to_thread(_client().move_large, amplitude, 0)
+            direction = -1          # next tick brings it back
             logger.info("keep-awake confirmation nudge sent (%d HID units)",
                         amplitude)
         except Exception as e:  # noqa: BLE001
@@ -3209,10 +3211,15 @@ def create_app(
                     continue
                 gw = _client()
                 try:
-                    # Mouse: big out-and-back sweep (net-zero drift).
-                    await asyncio.to_thread(gw.move_large, amplitude, 0)
-                    await asyncio.sleep(0.25)
-                    await asyncio.to_thread(gw.move_large, -amplitude, 0)
+                    # Mouse: one-way move, direction flipped each tick. The
+                    # cursor visibly lands somewhere new every time (so the
+                    # operator can see keep-awake is alive) and comes back on
+                    # the next tick, so it oscillates between two points
+                    # instead of drifting across the screen — which a
+                    # repeated same-direction nudge would do, eventually
+                    # pinning the pointer in a corner.
+                    await asyncio.to_thread(gw.move_large, amplitude * direction, 0)
+                    direction = -direction
                     # Keyboard: occasional single Cmd-Tab — real key
                     # activity (just switches to the previous app, no
                     # need to switch back).
