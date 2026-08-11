@@ -3309,6 +3309,17 @@ if ($btnTypeText) {
       // estimate rather than leaving the operator staring at a frozen
       // button wondering whether it worked.
       const lines = text.split(/\r\n|\r|\n/).length;
+      // Chunk size + pauses are the only pacing lever we have (the
+      // gateway's ~100 chars/s is fixed), so the presets trade speed for
+      // the target's input queue keeping up.
+      const SPEEDS = {
+        fast:     { chunk_size: 180, chunk_delay_ms: 0,   line_delay_ms: 30 },
+        normal:   { chunk_size: 60,  chunk_delay_ms: 40,  line_delay_ms: 60 },
+        careful:  { chunk_size: 20,  chunk_delay_ms: 120, line_delay_ms: 150 },
+        paranoid: { chunk_size: 8,   chunk_delay_ms: 300, line_delay_ms: 300 },
+      };
+      const speed = SPEEDS[document.getElementById("type-text-speed").value]
+                    || SPEEDS.normal;
       $typeTextStatus.textContent =
         `Typing ${text.length} chars / ${lines} lines — do not touch the target…`;
       try {
@@ -3319,9 +3330,8 @@ if ($btnTypeText) {
             text,
             newline_mode: document.getElementById("type-text-newline").value,
             tab_mode: document.getElementById("type-text-tabs").value,
-            line_delay_ms: parseInt(
-              document.getElementById("type-text-delay").value, 10) || 0,
             strict: document.getElementById("type-text-strict").checked,
+            ...speed,
           }),
         });
         const d = await r.json();

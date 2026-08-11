@@ -278,7 +278,12 @@ class TypeBlockRequest(BaseModel):
     # Pause between line chunks; gives the target's input queue room and
     # keeps editors with autocomplete/auto-indent from racing ahead.
     line_delay_ms: int = Field(default=60, ge=0, le=2000)
-    chunk_size: int = Field(default=180, ge=20, le=1000)
+    # The gateway types at ~100 chars/s (10 ms/char), which the receiving
+    # app's input queue cannot always absorb — the usual cause of
+    # intermittently dropped characters. Smaller chunks with a pause
+    # between them lower the average rate and let the target catch up.
+    chunk_size: int = Field(default=60, ge=5, le=1000)
+    chunk_delay_ms: int = Field(default=40, ge=0, le=2000)
     append_enter: bool = False
     secret: bool = False
 
@@ -2013,6 +2018,8 @@ def create_app(
                         await kb.send_text(part, warmup=first)
                     typed += len(part)
                     first = False
+                    if req.chunk_delay_ms:
+                        await asyncio.sleep(req.chunk_delay_ms / 1000.0)
                 if idx < len(lines) - 1:
                     if req.newline_mode == "shift_enter":
                         await kb.send_key_combo(["shift"], "Enter")

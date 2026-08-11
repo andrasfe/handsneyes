@@ -430,9 +430,14 @@
               <option value="skip">strip</option>
             </select>
           </label>
-          <label class="modal-label" title="Milliseconds to pause after each line. Raise it if the target drops characters or an editor auto-indents faster than typing.">
-            Line delay
-            <input type="number" id="type-text-delay" min="0" max="2000" step="10" value="60" />
+          <label class="modal-label" title="The HID layer types ~100 chars/s, which some apps drop characters at. Slower settings pause more often so the target's input queue can drain — use Careful for browsers, editors with autocomplete, or anywhere characters go missing.">
+            Speed
+            <select id="type-text-speed">
+              <option value="fast">Fast</option>
+              <option value="normal" selected>Normal</option>
+              <option value="careful">Careful</option>
+              <option value="paranoid">Paranoid</option>
+            </select>
           </label>
           <label class="modal-check" title="Refuse to type if any character has no HID mapping (e.g. curly quotes, em-dashes, emoji), instead of silently dropping it.">
             <input type="checkbox" id="type-text-strict" checked /> Refuse on unmappable characters
