@@ -3272,6 +3272,78 @@ if ($optTarget) {
   });
 }
 
+// ── type-text: paste a block, type it verbatim at the target's caret ──
+const $typeTextModal = document.getElementById("type-text-modal");
+const $typeTextBody = document.getElementById("type-text-body");
+const $typeTextStatus = document.getElementById("type-text-status");
+const $btnTypeText = document.getElementById("btn-type-text");
+
+function openTypeText() {
+  if (!$typeTextModal) return;
+  $typeTextStatus.textContent = "";
+  $typeTextModal.classList.remove("hidden");
+  $typeTextModal.setAttribute("aria-hidden", "false");
+  setTimeout(() => $typeTextBody && $typeTextBody.focus(), 50);
+}
+
+function closeTypeText() {
+  if (!$typeTextModal) return;
+  $typeTextModal.classList.add("hidden");
+  $typeTextModal.setAttribute("aria-hidden", "true");
+}
+
+if ($btnTypeText) {
+  $btnTypeText.addEventListener("click", openTypeText);
+  document.getElementById("type-text-close")
+    .addEventListener("click", closeTypeText);
+  document.getElementById("type-text-cancel")
+    .addEventListener("click", closeTypeText);
+
+  document.getElementById("type-text-submit")
+    .addEventListener("click", async () => {
+      const text = $typeTextBody.value;
+      if (!text) { $typeTextStatus.textContent = "Nothing to type."; return; }
+      const btn = document.getElementById("type-text-submit");
+      btn.disabled = true;
+      // Typing is slow (character-by-character over BT), so show an
+      // estimate rather than leaving the operator staring at a frozen
+      // button wondering whether it worked.
+      const lines = text.split(/\r\n|\r|\n/).length;
+      $typeTextStatus.textContent =
+        `Typing ${text.length} chars / ${lines} lines — do not touch the target…`;
+      try {
+        const r = await fetch("/api/keyboard/type-block", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text,
+            newline_mode: document.getElementById("type-text-newline").value,
+            tab_mode: document.getElementById("type-text-tabs").value,
+            line_delay_ms: parseInt(
+              document.getElementById("type-text-delay").value, 10) || 0,
+            strict: document.getElementById("type-text-strict").checked,
+          }),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+          $typeTextStatus.textContent = `Failed: ${d.detail || r.status}`;
+          appendSystemLog("ERROR", `type-text: ${d.detail || r.status}`);
+        } else {
+          const skipped = d.skipped
+            ? ` (${d.skipped} unmappable char(s) skipped)` : "";
+          $typeTextStatus.textContent =
+            `Typed ${d.chars} chars, ${d.lines} lines${skipped}.`;
+          appendSystemLog("INFO",
+            `type-text: ${d.chars} chars, ${d.lines} lines${skipped}`);
+        }
+      } catch (e) {
+        $typeTextStatus.textContent = `Error: ${e}`;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+}
+
 // ── keep-awake toggle ────────────────────────────────────────────
 // Server-side cursor jiggle on the active target so it never sleeps.
 // The button reflects on/off state; the loop lives on the server, so

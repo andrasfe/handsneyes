@@ -588,6 +588,27 @@ body.col-resizing img { pointer-events: none; }
   color: #0b0d10;
   font-weight: 600;
 }
+.type-text-opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  align-items: center;
+  margin: 8px 0 4px;
+}
+.type-text-opts .modal-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+.type-text-opts input[type="number"] { width: 72px; }
+.modal-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+}
+
 .keep-awake-cfg {
   display: inline-flex;
   align-items: center;

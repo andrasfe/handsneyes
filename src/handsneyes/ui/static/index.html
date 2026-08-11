@@ -110,6 +110,8 @@
                 title="Drag a rectangle on the frame to define a watch area. On every interval, capture a fresh frame; if a saturated UI element appears inside the rectangle, click it. No-op when no target is present, so it's safe to leave running.">Watch &amp; Click…</button>
         <button id="btn-exec-script" type="button" class="quick"
                 title="Open a textarea, paste a shell script, run it on the target">Execute Script…</button>
+        <button id="btn-type-text" type="button" class="quick"
+                title="Paste a block of text and type it verbatim at the target's caret — newlines, quotes, indentation preserved. Click into the destination field on the target first.">Type Text…</button>
         <button id="btn-keep-awake" type="button" class="quick"
                 title="Keep the active target awake: jiggle its cursor (big out-and-back sweep, no net drift) on the interval, plus a periodic Cmd-Tab, until you click again to stop. On enable it fires one visible one-way nudge (not returned to origin) so you can confirm it engaged. Runs server-side, so it keeps going even if you background this tab.">☕ Keep Awake</button>
         <span class="keep-awake-cfg" title="Keep-awake cadence. Changes apply live while it's running.">
@@ -392,6 +394,61 @@
       <div class="modal-footer">
         <button id="exec-modal-cancel" type="button">Cancel</button>
         <button id="exec-modal-run" type="button" class="primary">Run</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Type-Text modal: paste a block and type it verbatim at the caret -->
+  <div id="type-text-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-card">
+      <div class="modal-header">
+        <span>Type text at target's caret</span>
+        <button id="type-text-close" type="button" title="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <textarea
+          id="type-text-body"
+          rows="14"
+          placeholder="Paste anything here — newlines, quotes, indentation are reproduced 1:1."
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+        ></textarea>
+        <div class="type-text-opts">
+          <label class="modal-label" title="Enter suits editors and text areas; Shift+Enter suits chat boxes where Enter would send.">
+            Newlines
+            <select id="type-text-newline">
+              <option value="enter" selected>Enter</option>
+              <option value="shift_enter">Shift+Enter</option>
+            </select>
+          </label>
+          <label class="modal-label" title="Tab often moves focus in web forms, so spaces are safer.">
+            Tabs
+            <select id="type-text-tabs">
+              <option value="spaces" selected>as spaces</option>
+              <option value="tab">Tab key</option>
+              <option value="skip">strip</option>
+            </select>
+          </label>
+          <label class="modal-label" title="Milliseconds to pause after each line. Raise it if the target drops characters or an editor auto-indents faster than typing.">
+            Line delay
+            <input type="number" id="type-text-delay" min="0" max="2000" step="10" value="60" />
+          </label>
+          <label class="modal-check" title="Refuse to type if any character has no HID mapping (e.g. curly quotes, em-dashes, emoji), instead of silently dropping it.">
+            <input type="checkbox" id="type-text-strict" checked /> Refuse on unmappable characters
+          </label>
+        </div>
+        <p class="modal-hint">
+          Click into the destination field on the target first — this only
+          types, it does not focus anything. Typing is character-by-character
+          over Bluetooth, so a long block takes a while; watch it land before
+          touching the target.
+        </p>
+        <p id="type-text-status" class="modal-hint"></p>
+      </div>
+      <div class="modal-footer">
+        <button id="type-text-cancel" type="button">Cancel</button>
+        <button id="type-text-submit" type="button" class="primary">Type</button>
       </div>
     </div>
   </div>

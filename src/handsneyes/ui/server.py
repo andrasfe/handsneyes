@@ -256,6 +256,33 @@ class MouseScrollRequest(BaseModel):
     y_pct: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
+class TypeBlockRequest(BaseModel):
+    """Type a multi-line block verbatim at the target's caret.
+
+    Unlike /api/keyboard/text this understands line structure: the HID
+    layer has no scancode for "\\n", so newlines must be sent as Enter
+    keystrokes between per-line text runs.
+    """
+
+    text: str = Field(min_length=1, max_length=200_000)
+    # "enter" suits text areas and editors; "shift_enter" suits chat
+    # boxes where a bare Enter would send the message instead of
+    # inserting a newline.
+    newline_mode: str = Field(default="enter", pattern="^(enter|shift_enter)$")
+    # Tab moves focus in many web forms, so spaces are the safer default.
+    tab_mode: str = Field(default="spaces", pattern="^(tab|spaces|skip)$")
+    tab_width: int = Field(default=4, ge=1, le=16)
+    # Refuse the whole block if any character has no HID mapping, rather
+    # than silently typing a mangled copy. Off = skip them and report.
+    strict: bool = True
+    # Pause between line chunks; gives the target's input queue room and
+    # keeps editors with autocomplete/auto-indent from racing ahead.
+    line_delay_ms: int = Field(default=60, ge=0, le=2000)
+    chunk_size: int = Field(default=180, ge=20, le=1000)
+    append_enter: bool = False
+    secret: bool = False
+
+
 class KeyboardTextRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4096)
     warmup: bool = False
@@ -1900,6 +1927,125 @@ def create_app(
                 "secret": req.secret, "append_enter": req.append_enter,
             })
         return await _with_keyboard(go)
+
+    @app.post("/api/keyboard/type-block")
+    async def keyboard_type_block(req: TypeBlockRequest) -> JSONResponse:
+        """Type a pasted block verbatim at the target's current caret.
+
+        The caller is responsible for having focused the right field —
+        this only types. Line structure is reproduced by splitting on
+        newlines and sending Enter (or Shift+Enter) between runs, since
+        the HID layer has no scancode for "\\n".
+        """
+        from afferent.gateway.hid_codes import KEY_CODES, SHIFT_CHARS
+
+        # Normalise line endings so CRLF/CR pasted from anywhere yields
+        # exactly one newline each, never a doubled blank line.
+        text = req.text.replace("\r\n", "\n").replace("\r", "\n")
+        if req.tab_mode == "spaces":
+            text = text.expandtabs(req.tab_width)
+        elif req.tab_mode == "skip":
+            text = text.replace("\t", "")
+
+        def typeable(ch: str) -> bool:
+            return ch in KEY_CODES or ch in SHIFT_CHARS
+
+        # Pre-flight the whole block: typing half of it and then failing
+        # on an em-dash leaves the operator with corrupt input and no
+        # clean way to retry.
+        bad: dict[str, int] = {}
+        for ch in text:
+            if ch in ("\n", "\t"):
+                continue
+            if not typeable(ch):
+                bad[ch] = bad.get(ch, 0) + 1
+        if bad and req.strict:
+            sample = ", ".join(
+                f"{c!r}×{n}" for c, n in sorted(
+                    bad.items(), key=lambda kv: -kv[1])[:8]
+            )
+            raise HTTPException(
+                422,
+                f"{sum(bad.values())} character(s) have no HID mapping "
+                f"and would be dropped: {sample}. Replace them, or "
+                f"re-send with strict=false to skip them.",
+            )
+        if bad:
+            text = "".join(c for c in text if c == "\n" or typeable(c))
+
+        lines = text.split("\n")
+        # Long lines are split so no single gateway call runs long enough
+        # to hit the HTTP timeout mid-line.
+        def chunks(s: str):
+            for i in range(0, len(s), req.chunk_size):
+                yield s[i:i + req.chunk_size]
+
+        if runner.is_busy():
+            raise HTTPException(409, "a run is currently in progress")
+        from handsneyes.io.keyboard.backends.http import HttpKeyboardOutput
+        cfg = _commander_cfg()
+        # Generous timeout: each call types character-by-character over
+        # BT HID, which is far slower than a normal HTTP round trip.
+        kb = HttpKeyboardOutput(
+            base_url=cfg.pi_base_url, timeout=180.0, transport=cfg.transport,
+        )
+        try:
+            await kb.connect()
+        except Exception as e:
+            raise HTTPException(502, f"keyboard connect failed: {e}")
+
+        typed = 0
+        first = True
+        try:
+            for idx, line in enumerate(lines):
+                for part in chunks(line):
+                    if not part:
+                        continue
+                    try:
+                        # Warm up only once: the first keypress after an
+                        # idle link is routinely dropped, but the warmup
+                        # types a char twice with a Backspace between, so
+                        # repeating it mid-block would be visible.
+                        await kb.send_text(
+                            part, warmup=first, secret=req.secret,
+                        )
+                    except TypeError:
+                        await kb.send_text(part, warmup=first)
+                    typed += len(part)
+                    first = False
+                if idx < len(lines) - 1:
+                    if req.newline_mode == "shift_enter":
+                        await kb.send_key_combo(["shift"], "Enter")
+                    else:
+                        await kb.send_keystroke("Enter")
+                if req.line_delay_ms:
+                    await asyncio.sleep(req.line_delay_ms / 1000.0)
+            if req.append_enter:
+                await kb.send_keystroke("Enter")
+        except Exception as e:  # noqa: BLE001
+            # Report how far we got — the operator needs to know what is
+            # already on screen before retrying.
+            raise HTTPException(
+                502,
+                f"typing failed after {typed} of {len(text)} characters: {e}",
+            )
+        finally:
+            try:
+                await kb.disconnect()
+            except Exception:
+                pass
+
+        if not req.secret:
+            logger.info(
+                "type-block: %d chars, %d lines typed", typed, len(lines),
+            )
+        return JSONResponse({
+            "ok": True,
+            "chars": typed,
+            "lines": len(lines),
+            "skipped": sum(bad.values()),
+            "skipped_chars": sorted(bad),
+        })
 
     @app.post("/api/keyboard/key")
     async def keyboard_key(req: KeyboardKeyRequest) -> JSONResponse:
