@@ -3330,6 +3330,7 @@ if ($btnTypeText) {
             text,
             newline_mode: document.getElementById("type-text-newline").value,
             tab_mode: document.getElementById("type-text-tabs").value,
+            ascii_fold: document.getElementById("type-text-fold").checked,
             strict: document.getElementById("type-text-strict").checked,
             ...speed,
           }),
@@ -3339,12 +3340,14 @@ if ($btnTypeText) {
           $typeTextStatus.textContent = `Failed: ${d.detail || r.status}`;
           appendSystemLog("ERROR", `type-text: ${d.detail || r.status}`);
         } else {
-          const skipped = d.skipped
-            ? ` (${d.skipped} unmappable char(s) skipped)` : "";
+          const notes = [];
+          if (d.folded) notes.push(`${d.folded} smart char(s) → ASCII`);
+          if (d.skipped) notes.push(`${d.skipped} unmappable skipped`);
+          const suffix = notes.length ? ` (${notes.join(", ")})` : "";
           $typeTextStatus.textContent =
-            `Typed ${d.chars} chars, ${d.lines} lines${skipped}.`;
+            `Typed ${d.chars} chars, ${d.lines} lines${suffix}.`;
           appendSystemLog("INFO",
-            `type-text: ${d.chars} chars, ${d.lines} lines${skipped}`);
+            `type-text: ${d.chars} chars, ${d.lines} lines${suffix}`);
         }
       } catch (e) {
         $typeTextStatus.textContent = `Error: ${e}`;

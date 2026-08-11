@@ -256,6 +256,31 @@ class MouseScrollRequest(BaseModel):
     y_pct: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
+# Unicode punctuation that word processors, chat apps and LLM output are
+# full of, and which has no HID scancode. Without folding, an em-dash in
+# the middle of a paragraph stops typing dead at that character.
+ASCII_FOLD_MAP = {
+    "—": "--",  # em dash
+    "–": "-",   # en dash
+    "−": "-",   # minus sign
+    "‘": "'", "’": "'",           # curly single quotes
+    "“": '"', "”": '"',           # curly double quotes
+    "…": "...",                        # ellipsis
+    " ": " ", " ": " ", " ": " ",   # non-breaking spaces
+    "«": '"', "»": '"',           # guillemets
+    "•": "*",                          # bullet
+    "·": "-",                          # middle dot
+    "′": "'", "″": '"',           # prime marks
+    "×": "x",                          # multiplication sign
+    "→": "->", "←": "<-",         # arrows
+    "é": "e", "è": "e", "ê": "e",   # common accents
+    "á": "a", "à": "a", "â": "a",
+    "í": "i", "î": "i",
+    "ó": "o", "ô": "o", "ö": "o",
+    "ú": "u", "ü": "u", "ç": "c", "ñ": "n",
+}
+
+
 class TypeBlockRequest(BaseModel):
     """Type a multi-line block verbatim at the target's caret.
 
@@ -272,8 +297,13 @@ class TypeBlockRequest(BaseModel):
     # Tab moves focus in many web forms, so spaces are the safer default.
     tab_mode: str = Field(default="spaces", pattern="^(tab|spaces|skip)$")
     tab_width: int = Field(default=4, ge=1, le=16)
-    # Refuse the whole block if any character has no HID mapping, rather
-    # than silently typing a mangled copy. Off = skip them and report.
+    # Transliterate smart punctuation (em dashes, curly quotes, ellipses,
+    # accents) to ASCII first. These are pervasive in prose and have no
+    # HID scancode, so without folding a single em-dash mid-paragraph
+    # stops typing at that character.
+    ascii_fold: bool = True
+    # Refuse the whole block if any character still has no HID mapping,
+    # rather than silently typing a mangled copy. Off = skip and report.
     strict: bool = True
     # Pause between line chunks; gives the target's input queue room and
     # keeps editors with autocomplete/auto-indent from racing ahead.
@@ -1947,6 +1977,17 @@ def create_app(
         # Normalise line endings so CRLF/CR pasted from anywhere yields
         # exactly one newline each, never a doubled blank line.
         text = req.text.replace("\r\n", "\n").replace("\r", "\n")
+        folded = 0
+        if req.ascii_fold:
+            out = []
+            for ch in text:
+                repl = ASCII_FOLD_MAP.get(ch)
+                if repl is None:
+                    out.append(ch)
+                else:
+                    out.append(repl)
+                    folded += 1
+            text = "".join(out)
         if req.tab_mode == "spaces":
             text = text.expandtabs(req.tab_width)
         elif req.tab_mode == "skip":
@@ -2050,6 +2091,7 @@ def create_app(
             "ok": True,
             "chars": typed,
             "lines": len(lines),
+            "folded": folded,
             "skipped": sum(bad.values()),
             "skipped_chars": sorted(bad),
         })

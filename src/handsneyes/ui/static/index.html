@@ -439,7 +439,10 @@
               <option value="paranoid">Paranoid</option>
             </select>
           </label>
-          <label class="modal-check" title="Refuse to type if any character has no HID mapping (e.g. curly quotes, em-dashes, emoji), instead of silently dropping it.">
+          <label class="modal-check" title="Convert smart punctuation with no HID scancode into ASCII: em-dash to --, curly quotes to straight, ellipsis to ..., accents stripped. Without this a single em-dash stops typing dead at that character.">
+            <input type="checkbox" id="type-text-fold" checked /> Smart punctuation → ASCII
+          </label>
+          <label class="modal-check" title="Refuse to type if any character still has no HID mapping after folding (e.g. emoji), instead of silently dropping it.">
             <input type="checkbox" id="type-text-strict" checked /> Refuse on unmappable characters
           </label>
         </div>
